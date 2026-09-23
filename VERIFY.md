@@ -122,20 +122,11 @@ here its ✅ marks are our claim rather than something you can re-run. Its heade
 generator and its source for exactly that reason. The checkable version is the player terms above,
 plus the suites themselves.
 
-🔴 **That page is an OUTPUT, and this copy of it was produced before the deployment finished, so
-three of its sentences are behind the chain.** We publish it unedited, because hand-correcting a
-generated file is how a generated file stops being one — and we say plainly what is stale:
-
-| what the page says | what is true, and how to check |
-|---|---|
-| the wait before the beacon is "3 minutes" | it is **2 minutes** since 2026-09-23 — `(get-params)` returns `drand-margin: 120`, and [`deployments/mainnet01-chain-2.md`](deployments/mainnet01-chain-2.md) §5 has the transaction that changed it |
-| ⛔ "a machine and a budget for the helper … nothing runs it yet" | the helper runs, and has paid winners on chain — two of its payments are in `deployments/…` §4, and its code is in [`crank/`](crank/) |
-| 📋 "the contract must be deployed fresh" | it was, on 2026-09-22 — that line was written before the deploy |
-
-Everything else on that page was true when it was generated and, as far as we know, still is. The
-page will be regenerated; until it has been, **the live numbers come from `get-params` and from
-[`docs/ROULETTE-PLAYER-TERMS.md`](docs/ROULETTE-PLAYER-TERMS.md)**, which CI checks against the
-contract on every push.
+That page is regenerated from the contract and the suites whenever either changes. It states the
+contract's launch constants (for example the beacon wait the contract launched with) and points at
+the play page and the transparency page for the settings the operator has since changed, which are
+read from the chain there; `deployments/mainnet01-chain-2.md` records every such change with its
+transaction.
 
 Read all of it against the module and tell us if you find a sentence the code does not support.
 

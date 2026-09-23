@@ -54,7 +54,7 @@ settles it, and the winners collect.
 
 - ✅ Pay the same share of every KDA staked back to players, on all 158 bets on the table.
 - ✅ Take the winning number from a beacon produced away from Kadena, and check its proof on chain.
-- ✅ Lock each round to a beacon that does not exist yet, and stop taking bets 3 minutes before it appears.
+- ✅ Lock each round to a beacon that does not exist yet, and stop taking bets a fixed wait before it appears.
 - ✅ Let anyone settle a round, and pay a winner's money to the winner whoever sends the transaction.
 - ✅ Reserve the worst pocket before accepting a bet, so the pot can never fail to pay one it took.
 - ✅ Refund a round rather than keep it, if the beacon is ever retired.
@@ -128,9 +128,10 @@ settles it, and the winners collect.
    ✅ The first bet of a round opens it, and fixes the closing time, the beacon, the limit and the minimum for everyone who joins it.
 2. **The round takes bets.**
    ✅ A round takes bets for 2 minutes, by the chain's own clock, and not a moment longer.
-   ✅ The beacon the round is locked to appears 3 minutes after betting closes, so it does not exist while a bet can still be placed.
+   ✅ The beacon the round is locked to appears a fixed wait after betting closes, so it does not exist while a bet can still be placed.
+   ✅ The contract launched with that wait at 3 minutes; the house's current setting is shown on the play page, read from the chain.
    ✅ The wait before the beacon is the house's setting, and the contract refuses anything under 60 seconds or over 1 hour.
-   🟡 That floor is the lowest the setting can go and not a value that is safe to run at — the house's own value is 3 minutes — because at 60 seconds roughly one round in fourteen would have no block between its close and its beacon, and a watcher could then read the beacon and bet on it, out of the pot and never out of another player's stake.
+   🟡 That floor is the lowest the setting can go and not a value that is safe to run at — the house runs well above it — because at 60 seconds roughly one round in fourteen would have no block between its close and its beacon, and a watcher could then read the beacon and bet on it, out of the pot and never out of another player's stake.
    ✅ A round that has opened keeps the beacon it was given, whatever the house does to the wait afterwards.
    ✅ The next round to open takes the new wait.
    🟡 The wait is sized against six weeks of measured Kadena blocks, where the average gap between blocks was 30 seconds and the longest was 136.
@@ -145,6 +146,7 @@ settles it, and the winners collect.
    ✅ If you won, you claim. If you lost, you do nothing at all.
    ✅ Anyone can send that claim for you, and the money still goes to the account that placed the board.
    📋 The house's helper sends every winner's collection, so you need no KDA to be paid.
+   📋 The helper runs on two machines, each with its own budget; if both stopped, a winner could still claim alone.
    🟡 Unclaimed winnings never expire, and nothing sweeps them to the house.
 
 **Why not a Kadena block?** Because whoever produces a Kadena block sees what it would decide
@@ -282,8 +284,6 @@ are listed so this page accounts for every function in the contract, with nothin
 
 ## What is not built, or not true today
 
-- ⛔ **A machine and a budget for the helper that pays winners and resets the refund clock.** The
-  helper is what makes the collection promise above true, and nothing runs it yet.
 - ⛔ **A locked contract.**
 
 ---
@@ -301,9 +301,9 @@ are listed so this page accounts for every function in the contract, with nothin
    The table the contract settles from agrees with the rules on all 158 bets across all 37 numbers.
 3. The table's chain is **chain 2**: the chain where the earnings account already holds its
    balance, and where Smart Pacts' other live contract already runs.
-   📋 **The contract must be deployed fresh**, onto a chain that carries none of its records.
-   📋 **The account the earnings are paid to must exist and be spendable before the start** — the
-   contract can refuse an impossible account, but it cannot tell whose an account is.
+   📋 **The contract runs on a chain that carried none of its records when it started.**
+   📋 **The account the earnings are paid to exists and is spendable** — the contract refused to
+   start until it could be paid, but it cannot tell whose an account is.
 4. Gas is small: even a full board of chips costs far less than one block allows.
    A claim fits inside the gas ceiling a sponsor would set for it.
    A bet is never sponsored — a player funds their own stake, always.

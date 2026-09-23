@@ -49,9 +49,8 @@ deploy-bytes/     the exact bytes the deploy transactions carried, plus their sh
 deployments/      every mainnet transaction, with its request key and what confirmed it
 docs/             ROULETTE-PLAYER-TERMS.md — the rules and everything that can go wrong,
                   every number in it checked against the contract by CI;
-                  ROULETTE-WHAT-IT-DOES.md — the same in plain language. GENERATED, and this
-                  copy predates the deployment: VERIFY.md §5 lists the three sentences that
-                  are now behind the chain
+                  ROULETTE-WHAT-IT-DOES.md — the same in plain language, GENERATED from the
+                  contract and the test results (VERIFY.md §5)
 crank/            the helper that settles rounds and pays winners. Permissionless: it holds
                   no privilege, and anyone can run one
 verification/     the recorded identity of the deployed artifact
