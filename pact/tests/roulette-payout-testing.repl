@@ -1,0 +1,98 @@
+;; roulette-payout-testing.repl — paying a whole round's winners at once.
+;;
+;; The house's helper pays winners. At scale a round can hold hundreds
+;; of boards, so the helper must be able to pay many winners in ONE transaction:
+;; each claim installs its own coin.TRANSFER for a DIFFERENT receiver, and Pact's
+;; managed-cap identity is (sender, receiver), so distinct receivers never
+;; collide. Pinned here so the batching the bot relies on is a contract property,
+;; not a belief. Also pinned: the two ways a batch aborts as a whole, which is
+;; why the bot dry-runs every claim before it puts it in a batch.
+
+(load "roulette-test-init.repl")
+
+(env-chain-data { "block-time": (time "2026-09-20T17:41:13Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 500000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 500000.0)
+(commit-tx)
+
+;; forty players on red, one on black. Round 20801767 lands on 12, which is red.
+(env-enable-repl-natives true)
+(begin-tx)
+(module pay PG (defcap PG () (enforce true "ok"))
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  (defun acct:string (i:integer) (format "player-{}" [i]))
+  (defun place:string (i:integer key:string)
+    (let ((a (acct i)))
+      (env-sigs [{"key":"p00000000000000000000000000000000000000000000000000000000000000p"
+                 ,"caps":[(coin.TRANSFER a (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 10.0)]}])
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet a [{"key": key, "amt": 1.0}]))))
+(commit-tx)
+(env-data { "pk": { "keys": ["p00000000000000000000000000000000000000000000000000000000000000p"], "pred": "keys-all" } })
+(begin-tx)
+(test-capability (coin.COINBASE))
+(map (lambda (i:integer) (coin.coinbase (pay.acct i) (read-keyset "pk") 100.0)) (enumerate 1 41))
+(commit-tx)
+(begin-tx)
+(map (lambda (i:integer) (pay.place i "bet-red")) (enumerate 1 40))
+(pay.place 41 "bet-black")
+(expect "PAY-0 PRECONDITION forty-one boards sit in round 1" 41
+  (length (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.round-boards 1)))
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-20T17:46:20Z") })
+(begin-tx)
+(expect "PAY-0a the wheel lands on 12, red" 12
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.resolve 1 pay.SIG))
+(commit-tx)
+
+;; ============================================================================
+;; PAY-1  A BATCH THAT CONTAINS ONE LOSER ABORTS AS A WHOLE
+;;   This is why the helper dry-runs every claim before batching it. Mutating
+;;   expect-failure, so the block ends in rollback-tx.
+;; ============================================================================
+(begin-tx)
+(expect-failure "PAY-1 forty winners plus the loser: the whole transaction fails"
+  "nothing to claim: this board did not win"
+  (map (lambda (i:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 (pay.acct i))) (enumerate 1 41)))
+(rollback-tx)
+
+;; ============================================================================
+;; PAY-2  THE SAME ACCOUNT TWICE IN ONE BATCH ABORTS AS A WHOLE
+;; ============================================================================
+(begin-tx)
+(expect-failure "PAY-2 a winner listed twice fails on the second claim"
+  "this board has already been claimed"
+  (map (lambda (i:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 (pay.acct i))) [1 2 1]))
+(rollback-tx)
+
+;; ============================================================================
+;; PAY-3  FORTY DIFFERENT WINNERS ARE PAID IN ONE TRANSACTION
+;; ============================================================================
+(env-gasmodel "table") (env-gaslimit 150000)
+(begin-tx)
+(expect "PAY-3 PRECONDITION nothing has been paid yet" 80.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(env-gas 0)
+(map (lambda (i:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 (pay.acct i))) (enumerate 1 40))
+(print (format "GAS 40 claims to 40 accounts in one transaction: {}" [(env-gas)]))
+(expect "PAY-3a forty claims in one transaction stay well inside the transaction limit" true
+  (< (env-gas) 40000))
+(expect "PAY-3b every winner was paid: the round owes nothing" 0.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(expect "PAY-3c a winner holds their stake back plus the 1:1 win" 101.0
+  (coin.get-balance (pay.acct 7)))
+(expect "PAY-3d and the loser was not touched" 99.0
+  (coin.get-balance (pay.acct 41)))
+(expect "PAY-3e every paid board reads claimed" 40
+  (length (filter (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board}) (at 'claimed b))
+                  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.round-boards 1))))
+(commit-tx)
+
+(print "roulette payout suite complete: a round's winners are paid in one transaction")

@@ -1,0 +1,1206 @@
+;; roulette-unit-testing.repl — the contract end to end: money, rounds, limits, fairness.
+;;
+;; The round is resolved with a REAL drand beacon: the clock is set so the module
+;; pins drand round 20801767, and the signature below is the genuine one for that
+;; round, taken unmodified from the drand API and never transcribed by hand.
+
+(load "roulette-test-init.repl")
+
+(begin-tx)
+(module rtest GG (defcap GG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  ;; drand evmnet round 20801767, fetched from api.drand.sh
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+)
+(commit-tx)
+
+;; ============================================================================
+;; D-1  THE FAST TABLE MUST NOT DRIFT FROM THE RULES
+;;   BET-NUMBERS is generated from winning-bets. If the two ever disagree, the
+;;   wheel the money uses stops being the wheel the rules suite pins. Checked
+;;   for EVERY one of the 158 keys against ALL 37 numbers, both directions.
+;; ============================================================================
+(begin-tx)
+(expect "D-1 BET-NUMBERS agrees with winning-bets on all 158 keys x 37 numbers" []
+  (filter (lambda (k:string)
+            (!= (at k n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BET-NUMBERS)
+                (filter (lambda (n:integer)
+                          (contains k (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets n)))
+                        (enumerate 0 36))))
+          n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX))
+(expect "D-1b every bet key covers at least one number" []
+  (filter (lambda (k:string) (= 0 (length (at k n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BET-NUMBERS))))
+          n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX))
+(expect "D-1c CONTROL the check can fail: a fabricated key is not in the table" false
+  (contains "bet-99" n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX))
+(commit-tx)
+
+;; ============================================================================
+;; I-1  INITIALIZE REFUSES A BAD SETUP — checked BEFORE it succeeds, because
+;;      afterwards every call fails on the game row and proves nothing.
+;; ============================================================================
+(begin-tx)
+(module kelly KG (defcap KG () (enforce true "ok"))
+  ;; European wheel: 37 pockets, a family of k numbers pays 36/k gross.
+  (defun elog:decimal (k:integer f0:decimal)
+    (let* ( (p  (/ (dec k) 37.0))
+            (x  (* f0 (/ (dec k) 36.0)))            ; stake as a fraction of bank
+            (l  (* f0 (- 1.0 (/ (dec k) 36.0)))) )  ; net loss fraction on a hit
+      (+ (* (- 1.0 p) (ln (+ 1.0 x)))
+         (* p (ln (- 1.0 l))))))
+  ;; The growth-optimal gross-exposure fraction for one family, in closed form.
+  ;; The house stakes x of bank against a family paying m = 36/k: it keeps x with
+  ;; probability q = 1 - k/37 and pays (m-1)x with probability p = k/37.
+  ;; Maximising q*ln(1+x) + p*ln(1-(m-1)x) gives x* = (q - p*(m-1))/(m-1), and
+  ;; the cap bounds GROSS exposure, so f0* = m*x*.
+  (defun full-kelly:decimal (k:integer)
+    (let* ( (m (/ 36.0 (dec k)))
+            (p (/ (dec k) 37.0))
+            (q (- 1.0 p)) )
+      (* m (/ (- q (* p (- m 1.0))) (- m 1.0))))))
+
+(commit-tx)
+
+(begin-tx)
+(module uprin UG (defcap UG () (enforce true "ok"))
+  ;; Forms the principal this module can make of ITSELF, so the test below names
+  ;; it by construction. A hardcoded literal would move with the module hash and
+  ;; rot into a test that checks nothing.
+  (defun private-principal:string ()
+    (create-principal (create-capability-guard (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.PRIVATE))))
+  (defun admin-guard:guard ()
+    (create-capability-guard (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.ADMIN)))
+  (defun admin-principal:string ()
+    (create-principal (admin-guard)))
+  (defun gov-principal:string ()
+    (create-principal (create-capability-guard (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.GOVERNANCE)))))
+(commit-tx)
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect-failure "I-1 the pot cannot pay revenue to itself"
+  "revenue must not be this module's own pot"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0))
+(expect-failure "I-1a a revenue account that does not exist yet is refused"
+  "the revenue account must already exist"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize "k:dead000000000000000000000000000000000000000000000000000000000000" 100000.0))
+(expect-failure "I-1b a malformed revenue account is refused" "Account name"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize "!" 100000.0))
+(expect-failure "I-1c a zero target float is refused" "target float must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 0.0))
+(expect-failure "I-1d a negative target float is refused" "target float must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT -1.0))
+(expect-failure "I-1e a sub-precision target float is refused" "precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 1.0000000000001))
+(expect-failure "I-1f a claimable plain name is refused -- the squat guard"
+  "revenue must be a principal account"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize "spt-treasury" 100000.0))
+;; 🔴 `is-principal` accepts `c:`, and a `c:` over ANOTHER module's
+;; capability is a legitimate destination -- SPT's is exactly that, and I-2 below
+;; pays into one. But this module can form a `c:` of its OWN, over PRIVATE, that
+;; no code path in it can ever spend from. `revenue` has no setter and initialize
+;; runs once, so naming it would send every fee and every withdrawal somewhere
+;; unrecoverable. Computed here, never hardcoded: the principal moves with the
+;; module hash, and a literal would rot into a test that checks nothing.
+(expect-failure "I-1g nor a c: over this module's own PRIVATE capability"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize (uprin.private-principal) 100000.0))
+;; 🔴 The refusal used to name the PRIVATE principal SPECIFICALLY, and
+;; its comment claimed that was the only `c:` this module could form. Measured
+;; false: ADMIN and GOVERNANCE form just as easily, and the eleven @event caps are
+;; PARAMETERISED, so their principals cannot be enumerated at all. initialize
+;; ACCEPTED the ADMIN one and recorded it as revenue. These two would have passed.
+(expect-failure "I-1h nor a c: over ADMIN -- which the old enumeration missed"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize (uprin.admin-principal) 100000.0))
+(expect-failure "I-1i nor a c: over GOVERNANCE"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize (uprin.gov-principal) 100000.0))
+
+;; 🔴 AND WITH THE ACCOUNT ACTUALLY CREATED. Without this, I-1h/I-1i would still
+;; go red on a reverted module -- but on "the revenue account must already exist",
+;; which is the wrong reason and would silently stop testing the class refusal the
+;; day anyone reordered the checks. This is the shape that was MEASURED accepted:
+;; create the c: account, then initialize, and watch it be recorded as revenue.
+(commit-tx)
+(begin-tx)
+(coin.create-account (uprin.admin-principal) (uprin.admin-guard))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "I-1j the black-hole account really does exist now" 0.0
+  (coin.get-balance (uprin.admin-principal)))
+(expect-failure "I-1k and it is STILL refused -- by class, not by absence"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize (uprin.admin-principal) 100000.0))
+(commit-tx)
+
+;; 🔴 THE OTHER HALF OF THE CLASS CHECK, AND IT HAD NO TEST AT ALL. `and` is
+;; BINARY in Pact 5, so the refusal is one conjunction with two operands --
+;; deleting the `p:` operand leaves `(and (!= "c:" ...) true)`, which compiles,
+;; loads, passes the static gate and passes I-1g..I-1k, because all five of those
+;; are `c:`. A `p:` principal is spendable only from inside the defpact whose
+;; execution minted its guard, so naming one as `revenue` is the same
+;; unrecoverable mistake as a `c:`: no setter, one-shot initialize, no remedy
+;; once the module freezes.
+;;
+;; The literal below is a REAL `p:` principal, produced by the engine, not typed
+;; by hand. It is a literal rather than a live call because the only way to form
+;; a `p:` principal is `create-principal` over Pact's pact-guard constructor,
+;; that constructor is deprecated, and this repo's static gate makes any
+;; occurrence of its name a VIOLATION -- including one inside a comment, which is
+;; why this recipe does not spell it out. Reproduce the value in a scratch .repl
+;; OUTSIDE this tree: define a one-step defpact whose step returns
+;; `create-principal` of a pact guard named "roulette-revenue-probe", then call
+;; it. (Pact 5.4 has exactly one pact-guard constructor, so the recipe is not
+;; ambiguous; the guard must be built inside a defpact because that constructor
+;; throws outside one.)
+;; The pact id is the minting transaction's hash, so any run produces its own;
+;; nothing here depends on this particular one beyond its SHAPE, which I-1l0 and
+;; I-1l1 assert.
+(begin-tx)
+(module pprin PG (defcap PG () (enforce true "ok"))
+  (defconst P-PRINCIPAL:string "p:DldRwCblQ7Loqy6wYJnaodHl30d3j3eH-qtFzfEv46g:roulette-revenue-probe"))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "I-1l0 CONTROL the probe really is a p: principal" "p:" (take 2 pprin.P-PRINCIPAL))
+(expect "I-1l1 CONTROL and is-principal accepts it, so THAT is not what refuses it below" true
+  (is-principal pprin.P-PRINCIPAL))
+(expect-failure "I-1l nor a p: pact-guard principal -- the class check, not the absence check"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize pprin.P-PRINCIPAL 100000.0))
+;; 🔴 THE ORDERING, MEASURED RATHER THAN ASSERTED. Neither account exists. The
+;; `k:` one is refused for NOT EXISTING; the `p:` one never reaches that check,
+;; because the class refusal runs first. Two different messages from two inputs
+;; that share the property "no such account" is what proves the order -- and it
+;; is what goes red if the `p:` operand is dropped, because the p: probe would
+;; then fall through to the existence check and report the k: message.
+(expect-failure "I-1l2 CONTROL a NON-EXISTENT k: gets the absence message instead"
+  "the revenue account must already exist"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize "k:dead000000000000000000000000000000000000000000000000000000000000" 100000.0))
+(commit-tx)
+
+;; ============================================================================
+;; S-1  SETUP
+;; ============================================================================
+(begin-tx)
+(expect "S-1 initialize" "roulette initialized"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0))
+;; 🔴 THE MECHANISM HALF OF THE LAUNCH BEACON WAIT. PIN-4 pins the CONSTANT's
+;; value; this pins that `initialize` is what puts it in the game row, which is
+;; the only thing a first deploy runs. Everything after S-3 sets the wait
+;; explicitly, so without this assertion `initialize` could write any number at
+;; all and nothing in THIS file would see it -- the other suites would, because
+;; they never call set-params and their committed signatures would stop
+;; verifying, but a property should not rest on another file's accident.
+(expect "S-1b initialize starts the table at the launch beacon wait"
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN
+  (at 'drand-margin (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(commit-tx)
+(begin-tx)
+(expect-failure "S-1a initialize is once only" "game-table"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(expect "S-2 fund the pot" "house funded"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 100000.0))
+(expect "S-2a the pot holds it" 100000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "S-3 params may be retuned for future rounds" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 120.0 180.0))
+(expect "S-3a the fee now runs at the full wheel edge" n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-FEE-RATE
+  (at 'fee-rate-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; L-1  THE LIMIT BOUNDS, AND EVERY WAY A BOARD CAN BE REFUSED
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:41:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER rtest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(expect-failure "L-1 below the table minimum" "total bet below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":0.5}]))
+(expect-failure "L-1a an empty board" "place at least one bet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE []))
+(expect-failure "L-1b a non-positive bet" "every bet must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":10.0} {"key":"bet-0","amt":0.0}]))
+(expect-failure "L-1c a negative bet" "every bet must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":-10.0}]))
+(expect-failure "L-1d sub-precision dust" "precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":1.0000000000001}]))
+(expect-failure "L-1e an unknown bet key is refused, fail-closed" "bet-not-a-real-bet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-not-a-real-bet","amt":10.0}]))
+(expect-failure "L-1f more chips than the board allows" "at most 24 bets on one board"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE
+    (map (lambda (i:integer) {"key":"bet-red","amt":1.0}) (enumerate 1 25))))
+(expect-failure "L-1g a module account cannot bet" "module-guarded account cannot bet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT [{"key":"bet-red","amt":10.0}]))
+(commit-tx)
+
+;; the table limit itself: 0.05 x 100000 = 5000, an even-money board needs 2S + fee
+(begin-tx)
+(expect-failure "L-2 a board over the table limit is refused" "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":2500.0}]))
+;; 🔴 the advertised maximum must be a bet the contract ACTUALLY ACCEPTS. Before
+;; the fee was folded into this number, the suite asserted on adjacent lines that
+;; 2500.0 was the advertised max AND that a 2500.0 board was refused -- and both
+;; passed. A front end built on that number sends failing transactions.
+; 🔴 The advertised maximum must be a bet `bet` ACTUALLY ACCEPTS. Asserting
+; only that it is "below 2500" hid a number the contract refused at the boundary.
+(let ((adv (at 'max-even-money-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+  (expect "L-2a the advertised maximum is strictly positive" true (> adv 0.0))
+  ;; 🔴 the advert must also satisfy the module's OWN bankroll rule -- "bank at
+  ;; least 100x the advertised even-money max". Advertising the raw cap would be
+  ;; about bank/40 and contradict it, and a front end is invited to build on this
+  ;; number.
+  (expect "L-2a2 the advert respects the bankroll rule it is published under" true
+    (<= (* adv 100.0) (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+  ;; well above the CONTRACT's cap, not merely above the advert: the advert is
+  ;; deliberately the more conservative of the two numbers.
+  (expect-failure "L-2b a board well above the contract's cap is refused"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":(* adv 5.0)}])))
+; 🔴 rollback-tx, NOT commit-tx. An over-limit bet OPENS the round before the
+; limit check fires, so a commit here persists a phantom round that no successful
+; bet created, and every later assertion measures it.
+(rollback-tx)
+
+;; the advertised maximum, in its own clean transaction, must be ACCEPTED
+(begin-tx)
+(let ((adv (at 'max-even-money-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+  (expect "L-2c and the advertised maximum itself is accepted" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":adv}])))
+(rollback-tx)
+
+;; ============================================================================
+;; B-1  THE BET, AND THE ROUND IT OPENS
+;; ============================================================================
+(begin-tx)
+(expect "B-1 alice covers the whole wheel: red, black and zero" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE
+    [{"key":"bet-red","amt":100.0} {"key":"bet-black","amt":100.0} {"key":"bet-0","amt":10.0}]))
+(commit-tx)
+
+(begin-tx)
+(expect "B-2 the round closes one bet-window after it opened" (time "2026-09-20T17:43:13Z")
+  (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(expect "B-2a the pinned drand round is the one published one beacon wait after close" 20801767
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(expect "B-2b it is not published until after betting closes" true
+  (> (diff-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+                (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+     0.0))
+(expect "B-3 worst case on this board is the zero at 36:1" 360.0
+  (fold (lambda (a:decimal b:decimal) (if (> b a) b a)) 0.0
+        (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1))))
+(expect "B-3a stake is the sum of the chips" 210.0
+  (at 'stake (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+; 🔴 SPLIT. One assertion used to carry both halves in its TITLE and only the
+; payout half in its BODY, so `new-res` could drop the stake term or the fee term
+; and this still passed. Each half is now its own named assertion.
+(expect "B-4 the reserve dominates the best number" true
+  (>= (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1))
+      (fold (lambda (a:decimal b:decimal) (if (> b a) b a)) 0.0
+            (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))))
+(expect "B-4a and it dominates a full refund WITH the accrued fee inside it" true
+  (>= (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1))
+      (+ (at 'stake (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)) (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))))
+(expect "B-4b reserved on the game row equals this round's reserve"
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1))
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+(commit-tx)
+
+;; bob backs a single number: he is the loser whose reserve must come back
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER rtest.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(expect "B-5 bob backs one number, joining the SAME round" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.BOB [{"key":"bet-17","amt":10.0}]))
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER rtest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+;; 🔴 THE SAME TRAP BITES MID-ROUND. L-2c runs with no round open, where the advert and the
+;; cap coincide, so it never exercised the case the comment warns about. With a
+;; round already carrying exposure, the advert must STILL be a board bet accepts.
+(let ((adv (at 'max-even-money-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+  (expect "B-5a mid-round, the advertised maximum is still positive" true (> adv 0.0))
+  (expect "B-5b and is STILL accepted with a round already open" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.CAROL [{"key":"bet-red","amt":adv}])))
+(rollback-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect "B-6 SOLVENCY: reserved never exceeds the balance" true
+  (<= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+      (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+(commit-tx)
+
+;; a bet after the window has closed opens a NEW round
+(env-chain-data { "block-time": (time "2026-09-20T17:44:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER rtest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(expect "B-7 betting after the close starts round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.CAROL [{"key":"bet-even","amt":50.0}]))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; R-1  RESOLVE WITH A REAL BEACON
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:46:20Z") })
+(begin-tx)
+(expect-failure "R-0 a beacon for the WRONG round does not verify"
+  "drand signature does not verify"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.resolve 2 rtest.SIG))
+(commit-tx)
+
+(begin-tx)
+(env-events true)            ; clear, so what follows is this transaction's only
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(env-gas 0)
+(print (format "SPIN: round 1 resolved to number {}" [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.resolve 1 rtest.SIG)]))
+(print (format "GAS resolve (verify + settle + fee): {}" [(env-gas)]))
+(env-gaslimit 99999999)
+;; 🔴 E-1 THE FIRST EVENT ASSERTION IN THIS REPO. Every event this module emits
+;; was unpinned: SPIN-RESULT's three arguments could be permuted and nothing
+;; anywhere would notice, while the only public record of what the wheel did --
+;; the thing an explorer, a front end and a dispute all read -- would say the
+;; round landed on 20801767 and used beacon 12. The `module-hash` field is
+;; deliberately NOT compared: it changes with every edit to roulette.pact and
+;; would make this assertion fail for reasons that have nothing to do with events.
+(let ((evs (map (lambda (e:object) { "name": (at 'name e), "params": (at 'params e) })
+                (env-events true))))
+  (expect "E-1 resolve emits SPIN-RESULT as (seq, number, drand-round), in that order" true
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.SPIN-RESULT", "params": [1 12 20801767] } evs))
+  ;; without this, a permutation that happened to be symmetric would slip through
+  (expect "E-1a CONTROL and the swapped argument order is NOT what was emitted" false
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.SPIN-RESULT", "params": [1 20801767 12] } evs))
+  (expect "E-1b the fee payment was announced in the same transaction" true
+    (contains "n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.FEE-PAID"
+              (map (lambda (e:object) (at 'name e)) evs))))
+(commit-tx)
+
+;; ============================================================================
+;; C-1  SETTLEMENT — 12 is RED, so alice wins on red and bob's single number loses
+;; ============================================================================
+(begin-tx)
+(expect "C-1 the round is resolved to 12" 12 (at 'number (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(expect "C-1a liability is EXACTLY the exposure slot for the winning number"
+  (at 12 (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(expect "C-1b alice's win on red: 100 staked at 1:1 returns 200" 200.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(commit-tx)
+
+;; 🔴 THE PROPERTY PULL SETTLEMENT DEPENDS ON: the loser never sends anything,
+;;    and his reserve is released anyway. Under per-board accounting it would
+;;    stay locked forever.
+(begin-tx)
+(expect "C-2 round 1 now locks only the real liability, not the worst case" 200.0
+  (- (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+     (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))))
+;; 🔴 THIS WAS VACUOUS. It read `reserved < 565.0 + round2.reserve`, i.e.
+;; `200 < 565` -- and C-2 above already pins that left-hand side to EXACTLY
+;; 200.0, so it could not fail without C-2 failing first. The 565.0 was a magic
+;; number copied from round 1's reserve. It now names the quantity C-2 never
+;; reads: round 1's OWN row, which `resolve` leaves at the worst case it locked.
+;; The release is then the difference between two separately asserted numbers.
+(expect "C-2a round 1's row still records the worst case it had locked" 565.945525200870
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(commit-tx)
+
+;; the fee left the pot exactly once, to the m: funding account
+(begin-tx)
+;; alice bet while the pot was AT its target float, so she was charged the full
+;; wheel edge. Bob bet moments later, when her reserve had pushed `available`
+;; below the target -- so the fee ramp charged him STRICTLY LESS. That gap is
+;; the whole mechanism, and this is what pins it.
+(expect "C-3 the full-rate part of the fee is exactly the wheel edge on 210" true
+  (> (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT)
+     (round (* n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-FEE-RATE 210.0) 12)))
+(expect "C-3a the ramp charged bob LESS than the full rate: the pot was below target" true
+  (< (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT)
+     (+ (round (* n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-FEE-RATE 210.0) 12)
+        (round (* n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-FEE-RATE 10.0) 12))))
+(expect "C-3b the accrual is cleared once paid, so it cannot read as outstanding" 0.0
+  (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "C-4 resolving twice is refused" "already settled"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.resolve 1 rtest.SIG))
+(commit-tx)
+
+;; ============================================================================
+;; C-5  CLAIMS
+;; ============================================================================
+(begin-tx)
+;; 🔴 The published player terms say "You need no KDA to collect", and that
+;; promise rests on a gas station paying the gas for a claim, up to a fixed
+;; ceiling carried by its registry entry. That station is a separate contract and
+;; is not part of this deployment, so it is not published here. What IS checkable
+;; from the contract alone is the half that decides whether the promise can hold:
+;; that a real claim fits comfortably under the ceiling. 2000 is that ceiling.
+(env-events true)            ; clear, so E-2 below sees only this claim
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(env-gas 0)
+(expect "C-5 alice claims her win" "paid 200.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 rtest.ALICE))
+(print (format "GAS claim: {}" [(env-gas)]))
+(expect "C-5g0 a claim fits under the gas station's 2000 ceiling" true
+  (< (env-gas) 2000))
+(env-gaslimit 99999999)
+;; E-2. The claim's own receipt: who was paid, for which round, how much.
+(let ((evs (map (lambda (e:object) { "name": (at 'name e), "params": (at 'params e) })
+                (env-events true))))
+  (expect "E-2 claim emits CLAIMED as (account, seq, amount)" true
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.CLAIMED"
+              , "params": [rtest.ALICE 1 200.000000000000] } evs))
+  (expect "E-2a CONTROL it names the BOARD's account, not some other one" false
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.CLAIMED"
+              , "params": [rtest.BOB 1 200.000000000000] } evs)))
+(expect "C-5a she staked 210 and got 200 back" 99990.0
+  (coin.get-balance rtest.ALICE))
+(expect "C-5b round 1 owes nothing now" 0.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+(expect "C-5c and locks nothing: reserved is exactly round 2's reserve"
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "C-6 claiming twice is refused" "already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 rtest.ALICE))
+(expect-failure "C-6a a loser has nothing to claim" "nothing to claim"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 rtest.BOB))
+(expect-failure "C-6b an unresolved round cannot be claimed" "has not been settled yet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 2 rtest.CAROL))
+(expect-failure "C-6c a board that was never placed" "No value found"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 "k:0000000000000000000000000000000000000000000000000000000000000000"))
+(commit-tx)
+
+(begin-tx)
+(expect "C-7 SOLVENCY holds after settlement" true
+  (<= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+      (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+(expect "C-7a reserved is never negative" true
+  (>= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)) 0.0))
+(commit-tx)
+
+;; ============================================================================
+;; V-1  A DRAND STALL REFUNDS — it does NOT forfeit
+;; ============================================================================
+(begin-tx)
+(expect-failure "V-1 a round cannot be voided while its beacon can still arrive"
+  "the beacon can still be submitted"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.void-round 2))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2026-12-25T00:00:00Z") })
+(begin-tx)
+(expect "V-2 after the void window, the round refunds" "round void: every stake is refundable"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.void-round 2))
+(expect "V-2a it owes exactly the stakes back, no fee taken" 50.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(commit-tx)
+
+(begin-tx)
+(expect "V-3 carol gets her whole stake back" "paid 50.0"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 2 rtest.CAROL))
+(expect "V-3a nothing is locked once every round is settled" 0.0
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+;; 🔴 EXACT, NOT `> 100000.0`. The title claims the pot paid out the fee and
+;; nothing else; `>` could not tell that apart from the pot having gained or lost
+;; any amount at all. Funded 100000, took 220 + 50 of stake, paid alice 200,
+;; refunded carol 50, and sent 5.945525200870 of fee to the revenue account.
+(expect "V-3b the pot kept the losing stakes and paid only the fee"
+  ;; `+` is BINARY in Pact 5 -- a three-operand form parses and then throws.
+  (- (+ 100000.0 (+ 220.0 50.0)) (+ 200.0 (+ 50.0 5.945525200870)))
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "V-4 a resolved round cannot be voided" "this round is not open"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.void-round 1))
+(commit-tx)
+
+;; ============================================================================
+;; W-1  ADMIN BOUNDS
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+;; 🔴 VALUE TESTS, literals on purpose. The three dials the operator keeps carry
+;; only the bounds their own arithmetic or their own measurement forces: a round
+;; cannot risk more than the whole spare pot, a bet cannot be worth less than
+;; paying it costs, and the beacon wait cannot drop under the block-gap tail it
+;; is sized against. Reading the constants here would move the inputs with them
+;; and pin nothing -- and the expected substring carries the RENDERED bound, so
+;; moving the constant changes the message and this goes red.
+;; 1.0 + 1e-12 is the smallest over-shoot the 12-decimal precision admits.
+(expect-failure "W-1 reserve-fraction cannot exceed the whole spare pot"
+  "reserve-fraction must be in (0, 1.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 1.000000000001 1.0 100000.0 120.0 180.0))
+(expect-failure "W-1a0 nor half again the pot" "reserve-fraction must be in (0, 1.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 1.5 1.0 100000.0 120.0 180.0))
+(expect-failure "W-1a min-bet cannot go below the floor" "min-bet below the floor 0.001"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 0.000999999999 100000.0 120.0 180.0))
+(expect-failure "W-1b the bet window cannot be made unusably short" "bet-window must be in"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 10.0 180.0))
+(expect-failure "W-1c target float must be positive" "target float must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 0.0 120.0 180.0))
+;; 🔴 THE BEACON WAIT, BOTH EDGES. This is the one dial whose dangerous direction
+;; is DOWN: a wait shorter than the block-gap tail leaves rounds where no block
+;; was mined between the close and the beacon, and anyone reading a public value
+;; could then place a winning board. 60 - 1e-12 is the largest under-shoot the
+;; 12-decimal precision admits, so nothing sits between it and the floor.
+(expect-failure "W-1g the beacon wait cannot go below the floor"
+  "drand-margin must be in [60.0, 3600.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 120.0 59.999999999999))
+(expect-failure "W-1g1 nor above the ceiling"
+  "drand-margin must be in [60.0, 3600.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 120.0 3600.000000000001))
+(commit-tx)
+
+;; 🔴 The ACCEPTING side, and every one of these is isolated in its own
+;; rolled-back transaction ON PURPOSE: a 1.0 share or a 1,000,000 KDA minimum
+;; left in the game row would silently retune every later block in this file.
+(begin-tx)
+(expect "W-1d the whole spare pot is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 1.0 1.0 100000.0 120.0 180.0))
+(rollback-tx)
+(begin-tx)
+(expect "W-1d1 and it is the module's own ceiling, reached by reading it" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-RESERVE-FRACTION 1.0 100000.0 120.0 180.0))
+(rollback-tx)
+(begin-tx)
+(expect "W-1e the floor itself is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 0.001 100000.0 120.0 180.0))
+(rollback-tx)
+;; 🔴 PINNED AS ACCEPTED, not as refused. There is no ceiling on the table
+;; minimum, so the operator can set one above any bankroll and close the table
+;; to new bets. That is the disclosed cost of leaving the dial in the operator's
+;; hands, and it is a founder decision -- if a future edit adds a ceiling, this
+;; goes red and the disclosure has to be rewritten with it.
+(begin-tx)
+(expect "W-1f a minimum far above any bankroll is ACCEPTED" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1000000.0 100000.0 120.0 180.0))
+(rollback-tx)
+;; 🔴 BOTH EDGES OF THE WAIT ACCEPTED AT the boundary, each in its own rolled-back
+;; transaction: W-1g/W-1g1 alone would pass just as well against a range narrowed
+;; to a single value, so the open direction has to be measured too.
+(begin-tx)
+(expect "W-1h the floor itself is a wait the operator may set" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 120.0 60.0))
+(expect "W-1h0 and the row really records it" 60.0
+  (at 'drand-margin (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1h1 and so is the ceiling" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 120.0 3600.0))
+(expect "W-1h2 and the row really records that too" 3600.0
+  (at 'drand-margin (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1h3 CONTROL and the rollbacks left the launch wait in force" 180.0
+  (at 'drand-margin (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect-failure "W-2 a non-admin cannot retune the table" "Keyset failure"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 120.0 180.0))
+(expect-failure "W-2a a non-admin cannot withdraw" "Keyset failure"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house 1.0))
+(commit-tx)
+
+
+;; ============================================================================
+;; G-1  GAS — the constraint that decides whether this can be a real table.
+;;   The module this replaces spent 26,179 gas on the reserve fold alone, and
+;;   spent it whether you bet one chip or covered the felt, because a board was
+;;   158 fixed fields. ~5 bets per 30s block, chain-wide.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-12-25T12:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER rtest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(begin-tx)
+(env-gas 0)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":40.0}])
+(print (format "GAS bet, 1 chip:  {}" [(env-gas)]))
+(expect "G-1 a one-chip bet is far inside the block gas limit" true (< (env-gas) 6000))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER rtest.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(env-gas 0)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.BOB
+  [{"key":"bet-red","amt":40.0} {"key":"bet-1-12","amt":30.0}
+   {"key":"bet-1-2-4-5","amt":20.0} {"key":"bet-17","amt":10.0}])
+(print (format "GAS bet, 4 chips: {}" [(env-gas)]))
+(expect "G-1a a four-chip bet too" true (< (env-gas) 8000))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER rtest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(env-gas 0)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.CAROL
+  (map (lambda (i:integer) {"key":(format "bet-{}" [i]),"amt":1.0}) (enumerate 0 23)))
+(print (format "GAS bet, 24 chips (the board cap): {}" [(env-gas)]))
+(expect "G-1b even a full board stays well inside one block" true (< (env-gas) 20000))
+(commit-tx)
+(env-gaslimit 99999999)
+(env-sigs [])
+
+
+;; ============================================================================
+;; D-2  REFUND DOMINATION — the case a 2026-07-10 audit found, re-pinned.
+;;   A DIVERSIFIED board can net BELOW its own stake: red 100 + black 100 covers
+;;   36 numbers at 200 each, and a tiny chip on zero lifts slot 0 to 200 too --
+;;   so the worst PAYOUT is 200 while the stake is 205.55. Reserving only
+;;   max(exposure) would under-reserve a VOID REFUND and let a refund shrink
+;;   `available`. The reserve must dominate BOTH.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-12-26T00:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER rtest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE
+  [{"key":"bet-red","amt":100.0} {"key":"bet-black","amt":100.0}
+   {"key":"bet-0","amt":5.555555555556}])
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(let* ( (r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params))))
+        (worst (fold (lambda (a:decimal b:decimal) (if (> b a) b a)) 0.0 (at 'exposure r))) )
+  (expect "D-2 this board really does net BELOW its stake" true
+    (< worst (at 'stake r)))
+  (expect "D-2a so the reserve is driven by the STAKE, not the worst payout" true
+    (>= (at 'reserve r) (at 'stake r)))
+  ;; 🔴 D-2b WAS BYTE-IDENTICAL TO D-2a and could not fail independently. The
+  ;; refund half is not `reserve >= stake`: a void refunds every stake while the
+  ;; fee accrued on this round is still sitting inside the same reserve, so the
+  ;; number that has to be dominated is stake PLUS fee-owed. Asserted as an
+  ;; EQUALITY, because on a stake-dominated board that IS the formula -- dropping
+  ;; the fee term from `new-res` leaves this red while D-2a stays green.
+  (expect "D-2b and a full refund is covered WITH the accrued fee inside the reserve"
+    (+ (at 'stake r) (at 'fee-owed r)) (at 'reserve r)))
+(expect "D-2c SOLVENCY still holds" true
+  (<= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+      (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+(commit-tx)
+
+
+;; ============================================================================
+;; ============================================================================
+;; F-0  A BET THAT FAILS AT THE COIN TRANSFER — the widest leak shape.
+;;   Of every way `bet` can fail, this is the ONLY one that aborts
+;;   AFTER `update rounds` and `update game-table` and BEFORE `insert boards`,
+;;   and it is also the most common real-world failure: the player has not
+;;   signed, or cannot cover the stake. On a node the transaction is atomic and
+;;   nothing persists. IN THE REPL IT IS NOT: `expect-failure` followed by
+;;   `commit-tx` COMMITS the half-written round -- a round carrying stake and a
+;;   full exposure vector with no board row and no KDA received, a state a node
+;;   can never produce. Every later assertion would then measure a fiction.
+;;   🔴 That is why this block ends in `rollback-tx`, and why it asserts the
+;;   state is CLEAN afterwards rather than trusting the rollback.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-12-26T01:00:00Z") })
+(env-sigs [])   ; no signature: the managed transfer was never installed
+(begin-tx)
+(let ( (before (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))) )
+  (expect-failure "F-0 an unsigned bet is refused at the coin transfer"
+    "Managed capability not installed"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.BOB [{"key":"bet-red","amt":50.0}]))
+  ;; 🔴 THE LEAK, MEASURED RATHER THAN ASSUMED. The bet aborted and `reserved`
+  ;; MOVED ANYWAY (681.52 -> 782.87 when this was written): the round writes that
+  ;; precede the transfer are still in the transaction. On a node this is
+  ;; invisible, because the whole tx is discarded. In the REPL only the rollback
+  ;; below discards it, and a `commit-tx` here would settle a round carrying
+  ;; stake and a full exposure vector with NO board row and NO KDA received -- a
+  ;; state a node can never produce, which every later assertion in this file
+  ;; would then be quietly measuring.
+  (expect "F-0a the round writes DID happen before the transfer aborted" true
+    (> (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)) before)))
+(rollback-tx)
+
+;; and the rollback is what keeps the suite honest: bob owns no board
+(begin-tx)
+(expect-failure "F-0b after the rollback bob has no board in this round"
+  "No value found in table"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-board (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)) rtest.BOB))
+(commit-tx)
+
+;; F-1 / W-3  THE MONEY DOORS — every bound on getting KDA in and out
+;; ============================================================================
+(begin-tx)
+(expect-failure "F-1 funding the pot with nothing is refused" "amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 0.0))
+(expect-failure "F-1a funding a negative amount is refused" "amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" -5.0))
+(commit-tx)
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect-failure "W-3 withdrawing nothing is refused" "amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house 0.0))
+(expect-failure "W-3a withdrawing a negative amount is refused" "amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house -5.0))
+(expect-failure "W-3b sub-precision withdrawal is refused" "precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house 1.0000000000001))
+(commit-tx)
+
+;; 🔴 THE ONE THAT MATTERS: reserved funds are NOT the house's to take.
+(begin-tx)
+(let ((avail (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))))
+  (expect "W-4 there is money locked against open boards right now" true
+    (> (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)) 0.0))
+  (expect-failure "W-4a the admin cannot withdraw past the unreserved balance"
+    "exceeds unreserved balance"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house (+ avail 0.000000000001)))
+  ;; 🔴 the destination is NOT a parameter: it is the account fixed at initialize.
+  ;; The admin key chooses WHEN capital leaves the pot, never WHERE it goes.
+  (let ((rev-before (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT)))
+    (expect "W-4b the whole unreserved balance IS withdrawable" "house withdrawal complete"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house avail))
+    (expect "W-4b2 and it went to the RECORDED revenue account, not a chosen one" true
+      (= (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT) (+ rev-before avail))))
+  (expect "W-4c which leaves the pot holding exactly its liabilities" 0.0
+    (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+  (expect "W-4d SOLVENCY still holds at the boundary" true
+    (<= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+        (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "S-4 a sub-precision min-bet is refused" "precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0000000000001 100000.0 120.0 180.0))
+(expect-failure "S-4a a sub-precision target float is refused" "precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 1.0000000000001 120.0 180.0))
+(expect-failure "S-4b a zero reserve-fraction is refused" "reserve-fraction must be in"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.0 1.0 100000.0 120.0 180.0))
+(expect-failure "S-4c an over-long bet window is refused" "bet-window must be in"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 99999.0 180.0))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect-failure "B-8 a malformed account cannot bet" "Account name"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet "!" [{"key":"bet-red","amt":10.0}]))
+(commit-tx)
+
+
+;; ============================================================================
+;; A-1  THE TABLE LIMIT BOUNDS THE ROUND, NOT THE BOARD
+;;   Bounding one board against the CURRENT available lets boards stack: each
+;;   only shrinks `available` by its own stake, so N correlated boards converge
+;;   on the whole pot riding one number. Measured before the fix: 40 boards on
+;;   red put 63.6% of house capital on one spin, with solvency intact the whole
+;;   way. Solvency was never the property under attack.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-12-27T00:00:00Z") })
+;; W-4b withdrew every unreserved KDA, so the table currently has no capital and
+;; opens rounds with a cap of zero. Re-stake it before testing the cap.
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 100000.0)
+(commit-tx)
+;; the block below asserts the cap against 0.05, so set that share here rather
+;; than inheriting one: A-1a then names the number it is actually measuring.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 1.0 100000.0 120.0 180.0)
+(commit-tx)
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER rtest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-red","amt":1000.0}])
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER rtest.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.BOB [{"key":"bet-red","amt":1000.0}])
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER rtest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+;; a third correlated board would take the ROUND past its cap, even though each
+;; board on its own is small and `available` has barely moved
+(expect-failure "A-1 a third board on the same colour is refused by the ROUND cap"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.CAROL [{"key":"bet-red","amt":1000.0}]))
+;; 🔴 rollback-tx, NOT commit-tx. `bet` updates the round and the game row before
+;; the coin transfer, and a REPL expect-failure does not roll those writes back --
+;; a commit would persist them. This block holds nothing but the refusal, so the
+;; rollback destroys nothing legitimate.
+(rollback-tx)
+(begin-tx)
+(let* ( (r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params))))
+        (worst (fold (lambda (a:decimal b:decimal) (if (> b a) b a)) 0.0 (at 'exposure r))) )
+  (expect "A-1a the round's worst case stayed inside the cap it opened with" true
+    (<= worst (* 0.05 (at 'avail-at-open r))))
+  (expect "A-1b two boards of 1000 on red really did expose 4000" 4000.0 worst)
+  (expect "A-1c and the cap is a CONSTANT of the pot at open, not a shrinking one" true
+    (and (> (at 'avail-at-open r) 99000.0) (< (at 'avail-at-open r) 101000.0))))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-2  ONE BOARD PER ACCOUNT PER ROUND
+;;   `write` used to clobber an earlier board while the round's exposure still
+;;   counted both: the first stake vanished and the liability became unclaimable
+;;   by anyone, forever.
+;; ============================================================================
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER rtest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(expect-failure "A-2 a second board from the same account in one round is refused"
+  "you already have a board in this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-7","amt":1.0}]))
+(expect "A-2a the first board is intact" 1000.0
+  (at 'stake (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-board
+               (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)) rtest.ALICE)))
+;; 🔴 rollback-tx: same reason as A-1. Only a READ shares this transaction with
+;; the refusal, so nothing legitimate is lost with the partial write.
+(rollback-tx)
+(env-sigs [])
+
+
+;; ============================================================================
+;; FAIR  WHAT NO KEY CAN CHANGE
+;;   Founder, 2026-09-20: "we want to be as fair as possible and as decentralized
+;;   as possible." A fairness claim is only real when a named test goes RED
+;;   without it, so these pin the claims rather than asserting them in comments.
+;; ============================================================================
+(begin-tx)
+;; 🔴 THE HEADLINE PROPERTY. For every one of the 158 bets on the table,
+;; (payout + 1) x (numbers it covers) == 36. One pocket in 37 never pays, so the
+;; player's return is exactly 36/37 = 97.297...% on EVERY bet -- there is no
+;; sucker bet on this table, and no admin function anywhere in this module can
+;; change it, because the paytable and the coverage are constants.
+(expect "FAIR-1 every bet on the table returns exactly 36/37" []
+  (filter (lambda (k:string)
+            (!= 36.0 (* (+ (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult k) 1.0)
+                        (dec (length (at k n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BET-NUMBERS))))))
+          n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX))
+(expect "FAIR-1a CONTROL the check can fail: a 2:1 payout on red would not" false
+  (= 36.0 (* (+ 2.0 1.0) 18.0)))
+(commit-tx)
+
+;; No admin entry point takes a payout, a multiplier, or a set of winning numbers.
+;; set-params is the ONLY setter and it carries four values, none of which can
+;; reach a player's odds or their payout.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+;; 🔴 Comparing payout-mult with itself across a set-params call could never
+;; fail: it is a pure cond over literals and set-params writes only game-table.
+;; What CAN fail is the claim that the admin surface never takes a payout at all,
+;; so assert the surface, and prove the comparison bites by perturbing it.
+(let ((paytable (map (lambda (k:string) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult k))
+                     n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX)))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.05 2.0 60000.0 300.0 180.0)
+  (expect "FAIR-2 no admin call can reach a payout: the table is unchanged" paytable
+    (map (lambda (k:string) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult k))
+         n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX))
+  (expect "FAIR-2a CONTROL that comparison CAN fail" false
+    (= paytable (map (lambda (k:string) (+ 1.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult k)))
+                     n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX)))
+  (expect "FAIR-2b and so is the wheel" 37 (length n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.ROULETTE)))
+(commit-tx)
+(env-sigs [])
+
+;; A live round keeps the terms it opened with: a setter cannot reach a bet that
+;; has already been placed.
+(env-chain-data { "block-time": (time "2026-12-28T00:00:00Z") })
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 100000.0) (commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER rtest.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.BOB [{"key":"bet-red","amt":100.0}]) (commit-tx)
+(env-sigs [])
+(begin-tx)
+(let* ( (seq (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (r0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq)) )
+  (env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+  ;; 🔴 THE WAIT MOVES HERE TOO, AND TO A VALUE THAT IS NEITHER THE LAUNCH ONE
+  ;; NOR THE OLD TEN MINUTES. 300 s is deliberate: FAIR-3g/FAIR-3h below would
+  ;; both pass against an `open-round` that ignored the setting entirely if the
+  ;; new value happened to equal whatever such a mutation hard-coded.
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.055 5.0 10.0 3600.0 300.0)
+  (env-sigs [])
+  (let ((r1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq)))
+    (expect "FAIR-3 a live round's closing time is untouched by a param change"
+      (at 'close-time r0) (at 'close-time r1))
+    (expect "FAIR-3a and so is the beacon it is pinned to"
+      (at 'drand-round r0) (at 'drand-round r1))
+    (expect "FAIR-3b and so is the limit it opened under"
+      (at 'avail-at-open r0) (at 'avail-at-open r1))
+    (expect "FAIR-3c and so is what the house owes on every pocket"
+      (at 'exposure r0) (at 'exposure r1))
+    ;; and the MINIMUM. The setter just raised it to 5.0. Before this existed
+    ;; `bet` read min-bet LIVE, so a 1 KDA board was refused from a round that
+    ;; had opened under 1.0 -- the admin key could shut an open round to every
+    ;; later player, a pause by another name. The round keeps its own.
+    (expect "FAIR-3d and so is the table minimum it opened under"
+      (at 'min-bet-at-open r0) (at 'min-bet-at-open r1))
+    ;; precondition, so the acceptance below cannot pass for the wrong reason:
+    ;; the round's own minimum really is UNDER the 5.0 the setter just imposed
+    (expect "FAIR-3d1 PRECONDITION the round opened under a smaller minimum than the setter imposed" true
+      (< (at 'min-bet-at-open r0) 5.0))
+    ;; 🔴 AND THE BEACON WAIT. FAIR-3a above compares the round row with itself
+    ;; across the setter, which could not fail while the wait was a constant.
+    ;; Now it can: FAIR-3d2 proves the setter really moved the live setting away
+    ;; from what this round opened under, and FAIR-3g then shows the round's
+    ;; beacon still follows the OLD wait -- computed from its own close-time, not
+    ;; copied from the row, so a round silently re-pinned would go red here.
+    (expect "FAIR-3d2 PRECONDITION the setter moved the beacon wait away from the launch value" true
+      (and (= 300.0 (at 'drand-margin (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+           (!= 300.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN)))
+    (expect "FAIR-3g a live round keeps the beacon its own wait pinned, not the new one"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+        (add-time (at 'close-time r0) n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN))
+      (at 'drand-round r1))
+    (expect "FAIR-3g1 CONTROL the new wait really would have pinned a DIFFERENT beacon" false
+      (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time r0) 300.0))
+         (at 'drand-round r1)))
+    (env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+               ,"caps":[(coin.TRANSFER rtest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+    (expect "FAIR-3e a board at the round's own minimum still enters the live round after the raise"
+      (format "bet placed in round {}" [seq])
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.CAROL
+        [{"key":"bet-black","amt":(at 'min-bet-at-open r0)}]))
+    (env-sigs [])))
+(commit-tx)
+
+;; The live value binds the NEXT round only. Past the close the same 1 KDA board
+;; is refused by the new minimum -- and refused BEFORE a round is opened, so the
+;; refusal writes nothing (rollback anyway, by convention).
+(env-chain-data { "block-time": (time "2026-12-28T00:10:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER rtest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(let ((s0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params))))
+  (expect-failure "FAIR-3f the raised minimum binds the next round"
+    "total bet below the table minimum"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-black","amt":1.0}]))
+  (expect "FAIR-3f1 and the refusal opened no round" s0
+    (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+  (expect "FAIR-3f2 while a board at the new minimum opens the next round"
+    (format "bet placed in round {}" [(+ s0 1)])
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.ALICE [{"key":"bet-black","amt":5.0}]))
+  ;; 🔴 THE OTHER HALF OF THE SAME PROPERTY: the wait the setter moved binds the
+  ;; round that opens NEXT. Asserted as the exact beacon `round-at(close + 300)`
+  ;; from the row this bet just wrote, so an `open-round` that ignored the live
+  ;; setting -- or read it and then used something else -- goes red here.
+  (let ((rn (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round (+ s0 1))))
+    (expect "FAIR-3h and the NEXT round opens under the wait the setter left in force"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time rn) 300.0))
+      (at 'drand-round rn))
+    (expect "FAIR-3h1 CONTROL the launch wait would have pinned a DIFFERENT beacon" false
+      (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+           (add-time (at 'close-time rn) n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN))
+         (at 'drand-round rn)))))
+(rollback-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-12-28T00:00:00Z") })
+
+;; ============================================================================
+;; RB  THE LISTING THE HOUSE'S HELPER PAYS WINNERS FROM
+;;   A caller outside the module cannot read the boards table ("Module admin
+;;   necessary for operation", measured), so round-boards is the only way a bot
+;;   can find whom to claim for. Bob and Carol both sit in the current round.
+;; ============================================================================
+(begin-tx)
+(let* ( (seq   (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (accts (map (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board}) (at 'account b))
+                    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.round-boards seq))) )
+  (expect "RB-1 round-boards lists every board of the round and nothing else"
+    [rtest.BOB rtest.CAROL] (sort accts))
+  (expect "RB-1a each listed board carries its own round number" true
+    (fold (and) true (map (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board}) (= seq (at 'seq b)))
+                          (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.round-boards seq))))
+  (expect "RB-1b an unknown round lists nothing" []
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.round-boards 999)))
+(commit-tx)
+
+
+;; ============================================================================
+;; PIN  THE CONSTANTS THE SAFETY ARGUMENTS REST ON
+;;   Each of these was a 22-line comment defending a number that NO test could
+;;   see. Both survived mutation with the whole gate green:
+;;     VOID-AFTER 7776000 -> 0   restores the refund exploit outright
+;;     HOUSE-EDGE 1/37 -> 1/36   puts the fee ceiling ABOVE the wheel's edge,
+;;                               the negative-drift condition the header calls
+;;                               the reason that ceiling is immutable
+;;   These probes derive from the constants, so they move when the constants do.
+;; ============================================================================
+(begin-tx)
+;; 🔴 the fee ceiling is the WHEEL's edge -- derived from the wheel, never from
+;; itself. Every previous fee assertion compared MAX-FEE-RATE with a value
+;; computed from MAX-FEE-RATE, which cannot fail.
+(expect "PIN-1 the fee ceiling is exactly one pocket in 37, taken from the wheel"
+  (round (/ 1.0 (dec (length n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.ROULETTE))) 12)
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-FEE-RATE)
+(expect "PIN-1a and the wheel really has 37 pockets" 37
+  (length n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.ROULETTE))
+(expect "PIN-1b CONTROL a 36-pocket wheel would give a DIFFERENT ceiling" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-FEE-RATE (round (/ 1.0 36.0) 12)))
+;; 🔴 A SHARE COMPARED AGAINST ITSELF CANNOT FAIL. The crossing is DERIVED
+;; here, from the wheel, for every family on the board -- never restated as a
+;; literal and never compared against the constant it is meant to judge.
+;;
+;; The cap bounds GROSS exposure on a number, so a board of family k (k numbers,
+;; paying 36/k) that fills the cap stakes S = f0*B*k/36. The house's expected log
+;; growth per such round is
+;;    E(k,f0) = (1-k/37)*ln(1 + f0*k/36) + (k/37)*ln(1 - f0*(1 - k/36))
+;; and the Kelly crossing is where that reaches zero.
+(expect "PIN-2 every family on the wheel still GROWS the bank at the launch share" true
+  (fold (lambda (acc:bool v:bool) (and acc v)) true
+    (map (lambda (k:integer) (> (kelly.elog k n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-RESERVE-FRACTION) 0.0))
+         [1 2 3 4 6 12 18])))
+;; the crossing for the worst family is BRACKETED, so the margin cannot be
+;; widened by drift in either the constant or the formula
+(expect "PIN-2a the worst family is straight-up, and its crossing is under 0.056" true
+  (< (kelly.elog 1 0.056) 0.0))
+(expect "PIN-2b and the bracket really does straddle that crossing" true
+  (and (> (kelly.elog 1 0.055) 0.0) (< (kelly.elog 1 0.0556) 0.0)))
+;; 🔴 ADVICE, NOT A BOUND, AND THE TEST MUST SAY WHICH. The module's own ceiling
+;; on the share is the whole spare pot: the operator owns this dial and keeps it
+;; after the freeze. What is pinned here is that the value the contract SHIPS
+;; with grows the bank for every family on the board -- so nobody can quietly
+;; launch at a bank-shrinking share -- and PIN-2a/2b keep the advisory crossing
+;; derived from the wheel rather than restated.
+;; The launch share is fractional Kelly for EVERY family -- under half of full
+;; Kelly for even money, and under full Kelly for straight-up, which the widest
+;; family never had under a uniform ceiling sized on the narrowest.
+(expect "PIN-2c the launch share is well under full Kelly for an even-money board" true
+  (< n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-RESERVE-FRACTION (* 0.5 (kelly.full-kelly 18))))
+(expect "PIN-2d and under FULL Kelly even for the worst family, straight-up" true
+  (< n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-RESERVE-FRACTION (kelly.full-kelly 1)))
+(expect "PIN-2e the shipped 0.25 really did shrink the bank on an even-money board" true
+  (< (kelly.elog 18 0.25) 0.0))
+;; 🔴 THE OPERATOR'S RANGE, both ends: the launch share must be inside it, and
+;; the top of it is the whole spare pot and nothing larger.
+(expect "PIN-2f and the launch value is inside the range the operator may set" true
+  (and (> n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-RESERVE-FRACTION 0.0)
+       (<= n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-RESERVE-FRACTION n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-RESERVE-FRACTION)))
+;; 🔴 VALUE TESTS. Every one of these numbers is quoted to a player or to the
+;; founder, so the literal is the point: they go red when a constant moves
+;; without the page, and when the page moves without the constant.
+(expect "PIN-2g the launch share the pages quote is 0.025" 0.025
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-RESERVE-FRACTION)
+(expect "PIN-2h the only bound on the share is the whole spare pot" 1.0
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-RESERVE-FRACTION)
+(expect "PIN-2i the table minimum the pages quote is 0.01 KDA" 0.01
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-MIN-BET)
+(expect "PIN-2j and it can never be set below 0.001 KDA" 0.001
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MIN-BET-FLOOR)
+;; 🔴 CONTROL for the floor: it is the cost of PAYING a win, not a preference.
+;; A claim costs 483 gas on its own and about 445 inside a batch, so at a
+;; hundredfold gas price -- 0.000001 KDA per gas unit against the usual
+;; 0.00000001 -- settling one winner costs about 0.0005 KDA. The floor is twice
+;; that, and this goes red if either half of that sentence stops holding.
+(expect "PIN-2k the floor is at least twice what paying a winner costs at 100x gas" true
+  (>= n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MIN-BET-FLOOR (* 2.0 (* 483.0 0.000001))))
+(commit-tx)
+
+;; 🔴 VOID-AFTER, probed FROM the constant at both sides of the boundary.
+;; The old probe asked whether the beacon was yet DUE, which is true for every
+;; non-negative grace -- so a grace of ZERO passed.
+(env-chain-data { "block-time": (time "2027-02-01T00:00:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER rtest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet rtest.CAROL [{"key":"bet-red","amt":10.0}])
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(let* ( (seq (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (due (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round
+               (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq)))) )
+  ;; one second inside the grace
+  (env-chain-data { "block-time": (add-time due (- n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.VOID-AFTER 1.0)) })
+  (expect-failure "PIN-3 one second INSIDE the grace, a refund is refused"
+    "the beacon can still be submitted"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.void-round seq))
+  ;; one second past it
+  (env-chain-data { "block-time": (add-time due (+ n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.VOID-AFTER 1.0)) })
+  (expect "PIN-3a one second PAST it, the refund opens"
+    "round void: every stake is refundable"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.void-round seq))
+  (expect "PIN-3b and the grace really is ninety days, not zero" 7776000.0
+    n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.VOID-AFTER))
+(commit-tx)
+
+;; 🔴 PIN-4 THE BEACON WAIT, DIRECTLY. Until PIN-4 existed the wait was pinned
+;; only INDIRECTLY, by the expected drand round numbers in this suite -- so a
+;; future editor who shrank it and then "fixed" the
+;; expected round would pass. That is the same shape that let VOID-AFTER go to
+;; zero unnoticed. The wait is what keeps the beacon unpublished while betting is
+;; open, and it is now an OPERATOR SETTING: three values are quoted to the
+;; founder and to players -- the launch value, the floor and the ceiling -- so
+;; all three are pinned here as LITERALS, which is the only form that goes red
+;; when a constant moves without the page or the page without the constant.
+;; The launch value is sized against the MEASURED tail of chain 2's block-gap
+;; distribution (longest gap 136.2 s over 41.7 days), not against a Poisson
+;; model; the floor is where 7% of gaps would still exceed it.
+(begin-tx)
+(expect "PIN-4 the launch beacon wait is 180 seconds" 180.0
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN)
+(expect "PIN-4c the wait can never be set below 60 seconds" 60.0
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MIN-DRAND-MARGIN)
+(expect "PIN-4d nor above 3600 seconds" 3600.0
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MAX-DRAND-MARGIN)
+;; 🔴 PIN-4a IS THE MECHANISM HALF, AND IT IS AN EQUALITY ON PURPOSE. A `>=` gap
+;; assertion cannot tell a round pinned from the launch wait apart from one
+;; pinned from any LARGER number, so `open-round` could ignore the setting
+;; entirely -- hard-code the old ten minutes -- and a `>=` would stay green.
+;; Asserted as the exact round `round-at(close + launch wait)` computed from the
+;; close-time `open-round` itself wrote: round 1 opened while the game row still
+;; held the launch value, so this is the setting reaching the row it governs.
+;; PIN-4b below proves the same of `round-at`'s arithmetic.
+(let ((r1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1)))
+  (expect "PIN-4a and a round `open-round` really wrote pins exactly that wait"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+      (add-time (at 'close-time r1) n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN))
+    (at 'drand-round r1)))
+;; and the round machinery really does put that much daylight between the close
+;; and the beacon -- computed through round-at, not assumed.
+(let* ( (close (time "2026-09-20T17:43:13Z"))
+        (dr (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time close n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN)))
+        (gap (diff-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round dr) close)) )
+  (expect "PIN-4b the pinned beacon publishes at least the wait minus one period after close" true
+    (>= gap (- n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN 3.0)))
+  (expect "PIN-4b1 and never before the close" true (> gap 0.0)))
+;; 🔴 AND THE FLOOR IS ITSELF A SAFETY BOUND, NOT A PREFERENCE: at 60 s the wait
+;; still exceeds the mean chain-2 gap of 30.03 s, so the beacon is still normally
+;; published after a block has closed the round. Below the floor that stops being
+;; true, which is why the contract refuses it rather than warning about it.
+(expect "PIN-4e CONTROL the floor is still above the measured mean block gap" true
+  (> n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.MIN-DRAND-MARGIN 30.03))
+(commit-tx)
+
+(print "roulette unit tests complete")

@@ -1,0 +1,160 @@
+;; roulette-oracle-testing.repl — a DIFFERENTIAL accounting oracle.
+;;
+;; Every other suite checks scenarios: do these inputs produce that output. This
+;; one checks an INVARIANT, by recomputing the module's own bookkeeping a second
+;; way and requiring the two to agree after every single mutating call.
+;;
+;;   reserved  ==  sum over rounds of (open -> reserve, else -> liability)
+;;   pot       >=  reserved
+;;
+;; The recompute never reads `reserved`; it walks the round rows. So a bug that
+;; updates the aggregate wrongly shows up here even when every scenario test
+;; still passes -- which is exactly the failure a scenario suite cannot see.
+;;
+;; Adapted from an independent red-team oracle that was calibrated against a
+;; planted one-line bug; the same calibration is the falsification for this file.
+
+(load "roulette-test-init.repl")
+
+(begin-tx)
+(module oracle GG (defcap GG () (enforce true "ok"))
+  ;; A round's live obligation on the pot. `try 0.0` so a seq that was never
+  ;; opened folds harmlessly, letting us sweep a range.
+  (defun round-oblig:decimal (seq:integer)
+    (try 0.0
+      (let* ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq)) (st (at 'state r)))
+        (if (= st "open") (at 'reserve r) (at 'liability r)))))
+  (defun true-reserved:decimal (hi:integer)
+    (fold (+) 0.0 (map (round-oblig) (enumerate 1 hi))))
+  (defun contract-reserved:decimal () (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+  (defun pot:decimal () (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account)))
+  (defun check:string (hi:integer label:string)
+    (let ((tr (true-reserved hi)) (cr (contract-reserved)) (p (pot)))
+      (enforce (= tr cr) (format "{}: reserved DIVERGES contract={} oracle={}" [label cr tr]))
+      (enforce (>= p cr) (format "{}: INSOLVENT pot={} < reserved={}" [label p cr]))
+      (format "{} ok" [label])))
+)
+(commit-tx)
+
+(begin-tx)
+(module oprobe OG (defcap OG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  ;; the genuine beacon for round 2's pinned drand round, 20802058
+  (defconst SIG2 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160")
+  (defun vmax:decimal (xs:[decimal])
+    (fold (lambda (a:decimal b:decimal) (if (> b a) b a)) 0.0 xs)))
+(commit-tx)
+
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 50000.0)
+(expect "O-1 after initialize" "after initialize ok" (oracle.check 0 "after initialize"))
+;; 🔴 THE NEGATIVE CONTROL. A check that compares the contract with itself passes
+;; however broken the accounting is. It is here to show that the RECOMPUTE is the
+;; load-bearing half, not the comparison.
+(expect "O-1a CONTROL a self-comparison is vacuous and always passes" true
+  (= (oracle.contract-reserved) (oracle.contract-reserved)))
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 50000.0)
+(expect "O-2 after funding" "after funding ok" (oracle.check 0 "after funding"))
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-20T17:41:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet oprobe.ALICE [{"key":"bet-red","amt":100.0}])
+(expect "O-3 after a winning board is placed" "after bet 1 ok" (oracle.check 1 "after bet 1"))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet oprobe.BOB [{"key":"bet-17","amt":10.0}])
+(expect "O-4 after a losing board joins the same round" "after bet 2 ok" (oracle.check 1 "after bet 2"))
+(commit-tx)
+(env-sigs [])
+
+;; a second, independent round
+(env-chain-data { "block-time": (time "2026-09-20T17:55:46Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet oprobe.CAROL [{"key":"bet-even","amt":50.0}])
+(expect "O-5 with two rounds open at once" "two rounds open ok" (oracle.check 2 "two rounds open"))
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-20T17:46:20Z") })
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.resolve 1 oprobe.SIG)
+(expect "O-6 after resolve releases the losers' reserve" "after resolve ok" (oracle.check 2 "after resolve"))
+(commit-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 1 oprobe.ALICE)
+(expect "O-7 after the winner is paid" "after claim ok" (oracle.check 2 "after claim"))
+(commit-tx)
+
+;; 🔴 drain the pot to its reserved floor: the oracle must still balance, and the
+;; remaining obligation must still be covered.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+(expect "O-8 at the unreserved floor, still balanced and still solvent"
+  "at the floor ok" (oracle.check 2 "at the floor"))
+(expect "O-8a and there is genuinely nothing spare" 0.0
+  (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; O-8b  THE FEE IS INSIDE THE RESERVE, NOT BESIDE IT
+;;   `new-res` is max(max(exposure), stake) PLUS the fee accrued on the round.
+;;   Drop the fee term and every scenario suite stays green, because a pot with
+;;   any slack absorbs it. It is only visible HERE, at the unreserved floor:
+;;   `resolve` pays the fee out of the pot, and if the reserve never covered it
+;;   the pot drops BELOW what it still owes the winners of that same round.
+;;   Round 2 is Carol's even-money board, so max(exposure) = 100 exceeds her 50
+;;   stake and the reserve is payout-driven -- and beacon 20802058 lands it on
+;;   10, one of the eighteen pockets that IS the maximum. The whole probe is
+;;   rolled back, because O-9 below needs round 2 still open.
+;; ============================================================================
+(begin-tx)
+(expect "O-8b round 2 pins the beacon we hold a genuine signature for" 20802058
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(expect "O-8c its reserve is the worst payout PLUS the accrued fee, not the payout alone"
+  (+ (oprobe.vmax (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))) (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(let ((n (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.resolve 2 oprobe.SIG2)))
+  (expect "O-8d it settled onto a maximum-exposure pocket, so the release is the fee alone" true
+    (= (at n (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+       (oprobe.vmax (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))))))
+(expect "O-8e paying that fee at the floor leaves the pot still covering what it owes"
+  "resolved at the floor ok" (oracle.check 2 "resolved at the floor"))
+(expect "O-8f and the full liability is payable" "paid 100.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 2 oprobe.CAROL))
+(expect "O-8g with the books balanced afterwards"
+  "claimed at the floor ok" (oracle.check 2 "claimed at the floor"))
+(rollback-tx)
+
+;; the refund path, ninety days on, with nobody having proven drand alive
+(env-chain-data { "block-time": (time "2026-12-25T00:00:00Z") })
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.void-round 2)
+(expect "O-9 after a round voids" "after void ok" (oracle.check 2 "after void"))
+(commit-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.claim 2 oprobe.CAROL)
+(expect "O-10 after the refund is taken" "after refund ok" (oracle.check 2 "after refund"))
+(expect "O-10a every obligation is discharged" 0.0 (oracle.true-reserved 2))
+(expect "O-10b and the contract agrees" 0.0 (oracle.contract-reserved))
+(commit-tx)
+
+(print "accounting oracle: contract and independent recompute agreed at every step")

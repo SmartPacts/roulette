@@ -1,0 +1,375 @@
+;; roulette-rules-testing.repl — EXHAUSTIVE rules-conformance proof for
+;; n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette against OFFICIAL European (single-zero) roulette.
+;;
+;; Official source: https://en.wikipedia.org/wiki/Roulette (European wheel:
+;; numbers 0-36, single zero; bet types + payout odds; red set; snake set;
+;; wheel order). Every expected value in this file is transcribed from that
+;; source or derived from the printed layout geometry — NOT from the module.
+;;
+;; Strategy (strongest-first):
+;;   R2  an independent GENERATOR builds the complete official betting menu
+;;       (158 bets, each with its exact winning-number set) from first
+;;       principles: layout rows/columns for splits/streets/corners/lines,
+;;       parity/range for the even-money bets, the official red + snake sets.
+;;       For EVERY n in 0..36 the generator's winning set (restricted to the
+;;       158 keys the board offers) must EQUAL (winning-bets n) as a set.
+;;   R5  every offered key must pay the single official European formula
+;;       (36 - covered)/covered : 1  (35 straight, 17 split, 11 street,
+;;       8 corner/basket, 5 line, 2 column/dozen/snake, 1 even-money).
+;;   The remaining txs are direct, human-readable transcriptions of each
+;;   official rule (zero isolation, exact red/black sets, category payouts,
+;;   coverage cross-checks, board-payout arithmetic).
+;;
+;; No RNG / money-flow / lifecycle here — pure rules functions only.
+
+(load "roulette-test-init.repl")
+
+;; ============================================================================
+;; Generator module (test-only; never deployed)
+;; ============================================================================
+(begin-tx "define the official-rules generator")
+(namespace "n_48867b242317a0216a67f8c7ca26696b5878e0e3")
+(module rrules GG
+  (defcap GG () (enforce true "ok"))
+
+  ; Official red numbers (Wikipedia, European single-zero).
+  (defconst RED:[integer] [1 3 5 7 9 12 14 16 18 19 21 23 25 27 30 32 34 36])
+  ; Official snake-bet numbers (Wikipedia).
+  (defconst SNAKE:[integer] [1 5 9 12 14 16 19 23 27 30 32 34])
+  ; Official single-zero wheel order (Wikipedia:
+  ; 0-32-15-19-4-21-2-25-17-34-6-27-13-36-11-30-8-23-10-5-24-16-33-1-20-14-31-9-22-18-29-7-28-12-35-3-26).
+  (defconst WHEEL:[integer]
+    [0 32 15 19 4 21 2 25 17 34 6 27 13 36 11 30 8 23 10 5 24 16 33 1 20 14 31 9 22 18 29 7 28 12 35 3 26])
+
+  (defconst STRAIGHT-KEYS:list
+    (map (lambda (m:integer) (format "bet-{}" [m])) (enumerate 0 36)))
+
+  (defun join-nums:string (nums:[integer])
+    (fold (lambda (acc:string n:integer)
+            (if (= acc "") (format "{}" [n]) (format "{}-{}" [acc n])))
+          "" nums))
+  (defun mkbet:object (nums:[integer])
+    { "k": (+ "bet-" (join-nums nums)), "ns": nums })
+  (defun named:object (k:string nums:[integer]) { "k": k, "ns": nums })
+  (defun row-base:integer (r:integer) (+ 1 (* 3 r)))
+
+  ; The COMPLETE official European betting menu (158 bets), generated from
+  ; first principles. Layout geometry: 12 rows of 3 (row r = 3r+1..3r+3),
+  ; columns n mod 3, zero at the head.
+  (defun all-official:list ()
+    (fold (+) []
+      [ ; straight-up on every pocket INCLUDING zero (35:1)
+        (map (lambda (n:integer) (mkbet [n])) (enumerate 0 36))
+        ; horizontal splits: both same-row neighbour pairs of all 12 rows (17:1)
+        (fold (+) []
+          (map (lambda (r:integer)
+                 (let ((b (row-base r)))
+                   [ (mkbet [b (+ b 1)]) (mkbet [(+ b 1) (+ b 2)]) ]))
+               (enumerate 0 11)))
+        ; vertical splits: n with n+3 for every n in 1..33 (17:1)
+        (map (lambda (n:integer) (mkbet [n (+ n 3)])) (enumerate 1 33))
+        ; zero splits 0-1, 0-2, 0-3 (17:1)
+        (map (lambda (n:integer) (mkbet [0 n])) (enumerate 1 3))
+        ; streets: each full row (11:1)
+        (map (lambda (r:integer)
+               (let ((b (row-base r))) (mkbet [b (+ b 1) (+ b 2)])))
+             (enumerate 0 11))
+        ; trios with zero: 0-1-2 and 0-2-3 (11:1)
+        [ (mkbet [0 1 2]) (mkbet [0 2 3]) ]
+        ; corners: every 2x2 square — base n not in column 3, n <= 32 (8:1)
+        (map (lambda (n:integer) (mkbet [n (+ n 1) (+ n 3) (+ n 4)]))
+             (filter (lambda (n:integer) (!= 0 (mod n 3))) (enumerate 1 32)))
+        ; first four 0-1-2-3 — the single-zero "basket", named bet-top here (8:1)
+        [ (named "bet-top" [0 1 2 3]) ]
+        ; six lines / double streets: rows r and r+1 (5:1)
+        (map (lambda (r:integer)
+               (let ((b (row-base r))) (mkbet (enumerate b (+ b 5)))))
+             (enumerate 0 10))
+        ; columns: n mod 3 = 1 / 2 / 0 (2:1)
+        (map (lambda (c:integer)
+               (mkbet (map (lambda (i:integer) (+ c (* 3 i))) (enumerate 0 11))))
+             (enumerate 1 3))
+        ; dozens — range-named on this board (2:1)
+        [ (named "bet-1-12"  (enumerate 1 12))
+          (named "bet-13-24" (enumerate 13 24))
+          (named "bet-25-36" (enumerate 25 36)) ]
+        ; snake (2:1)
+        [ (named "bet-snake" SNAKE) ]
+        ; even-money bets — zero belongs to NONE of them (1:1)
+        [ (named "bet-odd"   (filter (lambda (n:integer) (= 1 (mod n 2))) (enumerate 1 36)))
+          (named "bet-even"  (filter (lambda (n:integer) (= 0 (mod n 2))) (enumerate 1 36)))
+          (named "bet-red"   RED)
+          (named "bet-black" (filter (lambda (n:integer) (not (contains n RED))) (enumerate 1 36)))
+          (named "bet-low"   (enumerate 1 18))
+          (named "bet-high"  (enumerate 19 36)) ]
+      ]))
+
+  (defconst OFFICIAL:list (all-official))
+  (defconst OFFICIAL-KEYS:list (map (lambda (b:object) (at "k" b)) OFFICIAL))
+
+  ; Official winning set for n, restricted to the keys the board offers.
+  (defun official-wins:list (n:integer)
+    (sort (map (lambda (b:object) (at "k" b))
+               (filter (lambda (b:object)
+                         (and (contains (at "k" b) n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX)
+                              (contains n (at "ns" b))))
+                       OFFICIAL))))
+
+  ; Numbers whose module winning set differs from the official generator.
+  (defun wb-mismatches:list ()
+    (filter (lambda (n:integer)
+              (!= (official-wins n) (sort (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets n))))
+            (enumerate 0 36)))
+
+  ; Numbers whose winning list contains a duplicate key.
+  (defun dup-numbers:list ()
+    (filter (lambda (n:integer)
+              (!= (length (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets n))
+                  (length (distinct (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets n)))))
+            (enumerate 0 36)))
+
+  ; Keys emitted by any winning-bets call that are NOT offered in BETS-INDEX.
+  (defun orphan-keys:list ()
+    (distinct (fold (+) []
+      (map (lambda (n:integer)
+             (filter (lambda (k:string)
+                       (not (contains k n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX)))
+                     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets n)))
+           (enumerate 0 36)))))
+
+  ; Official bets the board does NOT offer (menu gaps).
+  (defun missing-official:list ()
+    (sort (filter (lambda (k:string)
+                    (not (contains k n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX)))
+                  OFFICIAL-KEYS)))
+
+  ; Offered keys whose payout-mult differs from the official European law
+  ; (36 - covered)/covered : 1.
+  (defun payout-failures:list ()
+    (filter (lambda (b:object)
+              (and (contains (at "k" b) n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX)
+                   (let ((c (* 1.0 (length (at "ns" b)))))
+                     (!= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult (at "k" b))
+                         (/ (- 36.0 c) c)))))
+            OFFICIAL))
+
+  ; All numbers (0..36) whose winning set contains the given key.
+  (defun members-of:list (key:string)
+    (filter (lambda (n:integer)
+              (contains key (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets n)))
+            (enumerate 0 36)))
+
+  ; Count of straight-up keys inside n's winning set.
+  (defun straight-count:integer (n:integer)
+    (length (filter (lambda (k:string) (contains k STRAIGHT-KEYS))
+                    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets n))))
+)
+(commit-tx)
+
+;; ============================================================================
+;; R1 — the wheel is the official European single-zero wheel
+;; ============================================================================
+(begin-tx "R1: wheel")
+; Official rule: single-zero wheel order (Wikipedia clockwise sequence).
+(expect "R1a ROULETTE = the official European wheel order, 37 pockets"
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.WHEEL
+  n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.ROULETTE)
+; Every draw index maps to exactly one pocket; pockets are exactly 0..36.
+(expect "R1b wheel covers exactly the numbers 0..36, once each"
+  (enumerate 0 36)
+  (sort n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.ROULETTE))
+(commit-tx)
+
+;; ============================================================================
+;; R2 — MASTER PROOF: winning-bets(n) = official winning set for ALL 37 numbers
+;; ============================================================================
+(begin-tx "R2: generator equality over all 37 numbers")
+(expect "R2a generator menu is sane: 158 distinct official European bets"
+  158 (length (distinct n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.OFFICIAL-KEYS)))
+(expect "R2b the board offers 158 distinct bet keys"
+  158 (length (distinct n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX)))
+(expect "R2c every offered key IS an official European bet (no typo/ghost keys)"
+  []
+  (filter (lambda (k:string) (not (contains k n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.OFFICIAL-KEYS)))
+          n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX))
+; The board offers the COMPLETE official European menu — no gaps.
+(expect "R2d the board offers every official European bet (no menu gaps)"
+  [] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.missing-official))
+; THE conformance core: for every n in 0..36, the module's winning set equals
+; the independently generated official winning set (as sorted lists).
+(expect "R2e winning-bets(n) = official winning set for EVERY n in 0..36"
+  [] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.wb-mismatches))
+(expect "R2f no winning-bets list contains a duplicate key"
+  [] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.dup-numbers))
+(expect "R2g every key winning-bets ever emits is in BETS-INDEX (no orphans)"
+  [] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.orphan-keys))
+(commit-tx)
+
+;; ============================================================================
+;; R3 — zero isolation (the single-zero house edge)
+;; ============================================================================
+(begin-tx "R3: zero")
+; Official rule: 0 is neither odd nor even, neither red nor black, neither low
+; nor high, and belongs to no dozen/column. It IS covered by its own straight-up
+; bet, the three zero-splits, the two trios, and the first-four basket.
+(expect "R3a zero wins exactly its straight-up, zero-splits, trios and the basket"
+  ["bet-0" "bet-0-1" "bet-0-1-2" "bet-0-2" "bet-0-2-3" "bet-0-3" "bet-top"]
+  (sort (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets 0)))
+(expect "R3b zero is in NO even-money bet, dozen, or column"
+  []
+  (filter (lambda (k:string) (contains k (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.winning-bets 0)))
+          ["bet-red" "bet-black" "bet-odd" "bet-even" "bet-low" "bet-high"
+           "bet-1-12" "bet-13-24" "bet-25-36"
+           "bet-1-4-7-10-13-16-19-22-25-28-31-34"
+           "bet-2-5-8-11-14-17-20-23-26-29-32-35"
+           "bet-3-6-9-12-15-18-21-24-27-30-33-36"]))
+(commit-tx)
+
+;; ============================================================================
+;; R4 — exact member sets of every outside bet (inverse direction of R2)
+;; ============================================================================
+(begin-tx "R4: outside-bet member sets")
+; Official red set (18 numbers).
+(expect "R4a bet-red wins exactly the official red numbers"
+  [1 3 5 7 9 12 14 16 18 19 21 23 25 27 30 32 34 36]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-red"))
+; Black = the other 18 nonzero numbers.
+(expect "R4b bet-black wins exactly the official black numbers"
+  [2 4 6 8 10 11 13 15 17 20 22 24 26 28 29 31 33 35]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-black"))
+(expect "R4c red and black are disjoint and together cover exactly 1..36"
+  (enumerate 1 36)
+  (sort (+ (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-red")
+           (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-black"))))
+(expect "R4d bet-odd wins exactly the odd numbers 1..35"
+  [1 3 5 7 9 11 13 15 17 19 21 23 25 27 29 31 33 35]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-odd"))
+(expect "R4e bet-even wins exactly the even numbers 2..36 (NOT zero)"
+  [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-even"))
+(expect "R4f bet-low wins exactly 1..18"
+  (enumerate 1 18) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-low"))
+(expect "R4g bet-high wins exactly 19..36"
+  (enumerate 19 36) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-high"))
+; Official snake set.
+(expect "R4h bet-snake wins exactly 1,5,9,12,14,16,19,23,27,30,32,34"
+  [1 5 9 12 14 16 19 23 27 30 32 34]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-snake"))
+(expect "R4i first dozen wins exactly 1..12"
+  (enumerate 1 12) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-1-12"))
+(expect "R4j second dozen wins exactly 13..24"
+  (enumerate 13 24) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-13-24"))
+(expect "R4k third dozen wins exactly 25..36"
+  (enumerate 25 36) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-25-36"))
+(expect "R4l column 1 wins exactly 1,4,...,34"
+  [1 4 7 10 13 16 19 22 25 28 31 34]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-1-4-7-10-13-16-19-22-25-28-31-34"))
+(expect "R4m column 2 wins exactly 2,5,...,35"
+  [2 5 8 11 14 17 20 23 26 29 32 35]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-2-5-8-11-14-17-20-23-26-29-32-35"))
+(expect "R4n column 3 wins exactly 3,6,...,36"
+  [3 6 9 12 15 18 21 24 27 30 33 36]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-3-6-9-12-15-18-21-24-27-30-33-36"))
+(expect "R4o bet-top wins exactly 0,1,2,3"
+  [0 1 2 3] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-top"))
+; Straight-ups: every n INCLUDING zero wins its own single-number bet, no other.
+(expect "R4p every n in 0..36 wins exactly its own straight-up bet"
+  []
+  (filter (lambda (n:integer) (!= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.straight-count n) 1))
+          (enumerate 0 36)))
+; Zero-family inside bets win exactly their layout numbers.
+(expect "R4q zero splits/trios and a re-added vertical split cover exactly their numbers"
+  [[0] [0 1] [0 2] [0 3] [0 1 2] [0 2 3] [17 20]]
+  [ (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-0")
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-0-1")
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-0-2")
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-0-3")
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-0-1-2")
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-0-2-3")
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.members-of "bet-17-20") ])
+(commit-tx)
+
+;; ============================================================================
+;; R5 — payout odds: the official European law for every offered key
+;; ============================================================================
+(begin-tx "R5: payout multipliers")
+; Representative per category (official European odds, Wikipedia).
+(expect "R5a straight-up pays 35:1" 35.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-17"))
+(expect "R5b split pays 17:1"       17.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-1-2"))
+(expect "R5c street pays 11:1"      11.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-34-35-36"))
+(expect "R5d corner pays 8:1"        8.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-1-2-4-5"))
+(expect "R5e six line pays 5:1"      5.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-28-29-30-31-32-33"))
+(expect "R5f column pays 2:1"        2.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-1-4-7-10-13-16-19-22-25-28-31-34"))
+(expect "R5g dozen pays 2:1"         2.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-13-24"))
+(expect "R5h first-four basket pays 8:1" 8.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-top"))
+(expect "R5i snake pays 2:1"         2.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-snake"))
+(expect "R5j red pays 1:1"           1.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-red"))
+(expect "R5k black pays 1:1"         1.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-black"))
+(expect "R5l odd pays 1:1"           1.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-odd"))
+(expect "R5m even pays 1:1"          1.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-even"))
+(expect "R5n low pays 1:1"           1.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-low"))
+(expect "R5o high pays 1:1"          1.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-high"))
+(expect "R5o2 straight-up on ZERO pays 35:1" 35.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-0"))
+(expect "R5o3 zero split pays 17:1"  17.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-0-2"))
+(expect "R5o4 trio pays 11:1"        11.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.payout-mult "bet-0-1-2"))
+; THE payout law: every offered key pays (36 - covered)/covered : 1, the single
+; formula behind all official European odds. Also proves no offered key falls
+; through payout-mult to the non-decimal default.
+(expect "R5p ALL offered keys pay exactly (36-n)/n : 1 for n covered numbers"
+  [] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.payout-failures))
+(expect "R5q the payout law was checked for all 158 offered keys"
+  158
+  (length (filter (lambda (b:object)
+                    (contains (at "k" b) n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.BETS-INDEX))
+                  n_48867b242317a0216a67f8c7ca26696b5878e0e3.rrules.OFFICIAL)))
+(commit-tx)
+
+;; ============================================================================
+;; R6 — board-payout arithmetic: total return = (mult + 1) x stake, summed
+;; A board is now the chips actually placed, not 158 fields; the arithmetic and
+;; every hand-computed total below are unchanged.
+;; ============================================================================
+(begin-tx "R6: board-payout end-to-end arithmetic")
+; Straight-up total return: 35:1 win returns 36 x stake.
+(expect "R6a straight-up 10.0 on 17, wheel 17 -> returns 360.0"
+  360.0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board-payout [ {"key":"bet-17","amt":10.0} ] 17))
+; Mixed board on n=1 — every category that covers 1 wins, all others lose:
+;   bet-1 2.0x36=72; split 1-2 11.0x18=198; street 1-2-3 12.0x12=144;
+;   corner 1-2-4-5 9.0x9=81; line 1-6 8.0x6=48; column1 7.0x3=21;
+;   dozen1 4.0x3=12; top 3.0x9=27; snake 6.0x3=18; red 10.0x2=20;
+;   odd 5.0x2=10; low 1.5x2=3  => 654.0 total.
+;   (black 100, high 50, even 20 all LOSE and add nothing.)
+(expect "R6b mixed 15-bet board on n=1 pays the hand-computed 654.0"
+  654.0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board-payout
+    [ {"key":"bet-1","amt":2.0} {"key":"bet-1-2","amt":11.0} {"key":"bet-1-2-3","amt":12.0}
+      {"key":"bet-1-2-4-5","amt":9.0} {"key":"bet-1-2-3-4-5-6","amt":8.0}
+      {"key":"bet-1-4-7-10-13-16-19-22-25-28-31-34","amt":7.0}
+      {"key":"bet-1-12","amt":4.0} {"key":"bet-top","amt":3.0} {"key":"bet-snake","amt":6.0}
+      {"key":"bet-red","amt":10.0} {"key":"bet-odd","amt":5.0} {"key":"bet-low","amt":1.5}
+      {"key":"bet-black","amt":100.0} {"key":"bet-high","amt":50.0} {"key":"bet-even","amt":20.0} ] 1))
+; Same board, wheel 0: ONLY the basket pays (9 x 3.0); red/odd/low/dozen die.
+(expect "R6c same board on n=0 pays only the basket: 27.0"
+  27.0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board-payout
+    [ {"key":"bet-1","amt":2.0} {"key":"bet-1-2","amt":11.0} {"key":"bet-1-2-3","amt":12.0}
+      {"key":"bet-1-2-4-5","amt":9.0} {"key":"bet-1-2-3-4-5-6","amt":8.0}
+      {"key":"bet-1-4-7-10-13-16-19-22-25-28-31-34","amt":7.0}
+      {"key":"bet-1-12","amt":4.0} {"key":"bet-top","amt":3.0} {"key":"bet-snake","amt":6.0}
+      {"key":"bet-red","amt":10.0} {"key":"bet-odd","amt":5.0} {"key":"bet-low","amt":1.5}
+      {"key":"bet-black","amt":100.0} {"key":"bet-high","amt":50.0} {"key":"bet-even","amt":20.0} ] 0))
+; A losing board returns 0 (2 is black -> bet-red loses).
+(expect "R6d bet-red 10.0, wheel 2 (black) -> returns 0.0"
+  0.0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board-payout [ {"key":"bet-red","amt":10.0} ] 2))
+; Zero-family arithmetic: bet-0 10x36=360; split 0-1 2x18=36; trio 0-1-2 3x12=36;
+; basket 3x9=27 => 459.0 total on a zero spin.
+(expect "R6e zero-family board on n=0 pays the hand-computed 459.0"
+  459.0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.board-payout
+    [ {"key":"bet-0","amt":10.0} {"key":"bet-0-1","amt":2.0}
+      {"key":"bet-0-1-2","amt":3.0} {"key":"bet-top","amt":3.0} ] 0))
+(commit-tx)
+
+(print "roulette-rules-testing.repl: ALL EUROPEAN ROULETTE RULES CONFORMANCE CHECKS PASSED")

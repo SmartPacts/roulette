@@ -1,0 +1,37 @@
+{
+  "_what": "The recorded identity of the deployed artifact. Scripts read the namespace and the module names from here rather than restating them, so a gate cannot compare a constant with itself.",
+  "network": "mainnet01",
+  "chain": "2",
+  "ns": "n_48867b242317a0216a67f8c7ca26696b5878e0e3",
+  "deployed": "2026-09-22",
+  "node_read_back": "2026-09-23",
+  "modules": {
+    "roulette": {
+      "module_hash_on_chain": "Yk2rarIR8oFm9ttwQexea3vVol7MnQye_HZZNKqx0fU",
+      "_module_hash_note": "MEASURED on chain, never computed locally. A Pact 5 module hash covers its dependencies' hashes; roulette depends on coin, and the test suite loads a vendored coin snapshot while mainnet runs a different coin — so a hash computed here will NEVER equal this one and proves nothing. VERIFY.md compares the CODE instead.",
+      "deploy_bytes": "deploy-bytes/roulette.pact",
+      "deploy_bytes_sha256": "a99acbf968a88dc26a6cbed10bc2b53e5b7a3b88bf5c85b8b2c4ea091db8f603",
+      "chars_on_chain": 71843,
+      "frozen": false,
+      "governance": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-gov"
+    },
+    "drand": {
+      "module_hash_on_chain": "Y07t-duJmkXkcGth0TfBRg3ThbNR-uh9PdNUd1MKHBQ",
+      "_module_hash_note": "For THIS module a hash comparison is valid and is worth running: drand has no dependencies, holds no table and uses no other module, so the hash the REPL computes from pact/modules/drand.pact equals the one mainnet reports. It is also the literal roulette pins in its `use`.",
+      "deploy_bytes": "deploy-bytes/drand.pact",
+      "deploy_bytes_sha256": "4df5d5dca13bcc64bdd55a9666b2b958073cf34a7166d26486d84795132efd24",
+      "chars_on_chain": 10324,
+      "frozen": true,
+      "governance": "(enforce false) — sealed at deploy; it can never be upgraded"
+    }
+  },
+  "beacon": {
+    "source": "drand",
+    "chain_hash": "04f1e9062b8a81f848fded9c12306733282b2727ecced50032187751166ec8c3",
+    "scheme": "bls-bn254-unchained-on-g1",
+    "period_seconds": 3,
+    "_note": "roulette pins the verifier by hash in its `use`, so it cannot silently settle from different verifier code. pact/tests/roulette-pin-must-fail.repl is the control that proves the pin bites."
+  },
+  "audit_status": "INTERNAL_COLD_REVIEW",
+  "_audit_note": "Reviewed from a cold context by a reviewer with no implementation history, plus an offensive engagement that executed its attacks against this module. That is NOT a paid third-party engagement, and we do not present it as one. No external firm has been paid to review this contract."
+}

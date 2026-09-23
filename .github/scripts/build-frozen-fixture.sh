@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Build the FROZEN fixture: pact/modules/roulette.pact with the GOVERNANCE body replaced by
+# (enforce false) and NOTHING ELSE changed, plus the same test harness pointed at it.
+#
+# Both outputs are committed under pact/tests/fixtures/ so a reader can read them, and both are
+# RE-DERIVED here on every run: run-tests.sh calls this script and then diffs the committed
+# copies against what it produced, so the fixture cannot drift away from the module it claims to
+# be. The frozen suite proves what a freeze changes; if the fixture were some other contract,
+# that suite would prove nothing.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+python3 - <<'PY'
+import os
+
+OUT = 'pact/tests/fixtures'
+os.makedirs(OUT, exist_ok=True)
+src = open('pact/modules/roulette.pact').read()
+
+old = '''  (defcap GOVERNANCE ()
+    (enforce-guard (keyset-ref-guard "n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-gov")))'''
+new = '''  (defcap GOVERNANCE ()
+    (enforce false "this module is frozen: it can never be upgraded"))'''
+assert src.count(old) == 1, "GOVERNANCE body not found exactly once — fixture cannot be built"
+frozen = src.replace(old, new)
+open(os.path.join(OUT, 'roulette-frozen.pact'), 'w').write(frozen)
+
+# THE SAME harness, pointed at the frozen module instead of the real one. Nothing else about the
+# environment changes, so a difference the suite sees is a difference the FREEZE made.
+init = open('pact/tests/roulette-test-init.repl').read()
+assert '(load "../modules/roulette.pact")' in init
+init = init.replace('(load "../modules/roulette.pact")', '(load "roulette-frozen.pact")')
+init = init.replace('(load "../vendor/fixtures/', '(load "../../vendor/fixtures/')
+init = init.replace('(load "../modules/drand.pact")', '(load "../../modules/drand.pact")')
+open(os.path.join(OUT, 'frozen-init.repl'), 'w').write(init)
+
+# Prove the ONLY difference is the governance body. Deleting the substituted text from each side
+# must leave two identical files; anything else means the fixture is not this module.
+a = src.replace(old, ''); b = frozen.replace(new, '')
+assert a == b, "the fixture differs from pact/modules/roulette.pact somewhere other than GOVERNANCE"
+print("   frozen fixture built; differs from pact/modules/roulette.pact ONLY in the GOVERNANCE body")
+PY

@@ -1,0 +1,169 @@
+;; roulette-internals-testing.repl — the INTERNAL EXPORTS, driven directly.
+;;
+;; Pact has no `private`. `open-round` is a public export gated by an
+;; argument-free `true`-bodied token, so anyone who can put that token in scope
+;; calls it directly, with whatever the signature lets them pass.
+;;
+;; So the signature passes nothing. `open-round` takes NO arguments: the round
+;; number, the window, the share of the pot the round may risk, the table minimum
+;; and the beacon wait all come out of the game row, which only ADMIN can write.
+;; This suite drives the export the way the module's own doc string says it is
+;; reachable -- acquire module admin, then compose the token from a foreign
+;; module -- and checks that what a round FREEZES is what the row said, not what
+;; the caller wanted. The caller no longer gets a say; there is no argument left.
+;;
+;; IN-0 is the control, and it is not optional: without a valid call that
+;; SUCCEEDS through this driver, every assertion below would pass just as happily
+;; if the driver simply could not reach `open-round` at all.
+
+(load "roulette-test-init.repl")
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(module drv DG (defcap DG () (enforce true "ok"))
+  (defcap PRIV:bool () (compose-capability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.PRIVATE)))
+  (defun open:integer () (with-capability (PRIV) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.open-round))))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2027-03-01T00:00:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+
+;; ---------------------------------------------------------------- IN-0 control
+;; The driver really does reach `open-round`, and the round it opens is the one
+;; after the last -- computed here, never named by the caller.
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette)
+(expect "IN-0 PRECONDITION the last round opened is 0" 0
+  (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(expect "IN-0 the driver really does reach open-round -- a valid call SUCCEEDS" 1
+  (drv.open))
+(expect "IN-0a and it opened the round AFTER the last one" 1
+  (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(expect "IN-0b which is also the one now taking bets" 1
+  (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(commit-tx)
+
+;; ------------------------------------------- IN-1  the counter only ever ADVANCES
+;; The rewind that would abort every later bet forever is not refused any more --
+;; it cannot be expressed. `seq` is `round-seq + 1`, read in the same call that
+;; writes it back, so a caller has nothing to rewind WITH.
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette)
+(expect "IN-1 a second call opens the NEXT round, never the same one again" 2
+  (drv.open))
+(expect "IN-1a and a third opens the one after that" 3 (drv.open))
+(expect "IN-1b the row agrees" 3
+  (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(rollback-tx)
+
+;; ======================================================================
+;; IN-2..IN-5  WHAT A ROUND FREEZES IS WHAT THE ROW SAID
+;;   `set-params` writes the four terms; the export reads them. Every value
+;;   below is deliberately NOT the launch one, so an `open-round` that ignored
+;;   the row and hard-coded the deploy constants goes RED on all four. Each one
+;;   carries its own CONTROL showing the launch value would have written
+;;   something different.
+;; ======================================================================
+;; Every value here is deliberately NOT the launch one. 🔴 Each assertion is its
+;; own top-level form on purpose: several `expect`s inside one `let*` print a
+;; SINGLE trace line carrying the last one's label, so a suite written that way
+;; cannot show that a NAMED assertion ran.
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 0.5 7.0 100000.0 300.0 240.0)
+(commit-tx)
+
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette)
+(expect "IN-2 PRECONDITION the driver opens round 2 under those params" 2 (drv.open))
+(commit-tx)
+
+;; IN-2  the window
+(begin-tx)
+(expect "IN-2a the round closes exactly one row-window after it opened"
+  (add-time (time "2027-03-01T00:00:00Z") 300.0)
+  (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(expect "IN-2b CONTROL the launch window would have closed it somewhere else" false
+  (= (add-time (time "2027-03-01T00:00:00Z") n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-BET-WINDOW)
+     (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))))
+(commit-tx)
+
+;; IN-3  the share of the pot this round may put at risk
+(begin-tx)
+(expect "IN-3 the round carries exactly the row's share" 0.5
+  (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(expect "IN-3a CONTROL the launch share is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-RESERVE-FRACTION
+     (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))))
+(commit-tx)
+
+;; IN-4  the table minimum
+(begin-tx)
+(expect "IN-4 the round carries exactly the row's minimum" 7.0
+  (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(expect "IN-4a CONTROL the launch minimum is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-MIN-BET
+     (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))))
+(commit-tx)
+
+;; IN-5  the beacon wait -- asserted as the exact beacon the row's wait pins from
+;; the close-time the call itself wrote, so a round pinned from any other number
+;; goes red here.
+(begin-tx)
+(expect "IN-5 the round is pinned to the beacon the row's wait names"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+    (add-time (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)) 240.0))
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(expect "IN-5a CONTROL the launch wait would have pinned a DIFFERENT beacon" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+       (add-time (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))
+                 n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.LAUNCH-DRAND-MARGIN))
+     (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2))))
+(commit-tx)
+
+;; and the pot the round may draw on is RECOMPUTED in the call, never handed in:
+;; the whole unreserved balance at that instant.
+(begin-tx)
+(expect "IN-5b the round's headroom is the pot's own unreserved balance"
+  (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+  (at 'avail-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 2)))
+(commit-tx)
+
+;; ------------------------------- IN-6  a direct caller cannot pick ANY value
+;; The negative that replaces the old bound re-assertions: there is no argument
+;; to pick. Any attempt to hand this export a window, a share, a minimum or a
+;; round number is refused by the engine before a line of the module runs.
+;; 🔴 That refusal is the ENGINE's wording, not this module's, so the label is
+;; what identifies this test -- no module-unique string exists for an arity.
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette)
+(expect-failure "IN-6 a caller cannot name the round number"
+  "Attempted to apply a closure to too many arguments"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.open-round 1))
+(expect-failure "IN-6a nor the window, the share and the minimum"
+  "Attempted to apply a closure to too many arguments"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.open-round 1 120.0 1.0 0.001))
+(rollback-tx)
+
+;; ------------------------------- IN-7  and it is still gated on the token
+;; The export is reachable only with PRIVATE in scope. Without it, nothing else
+;; in this suite would mean anything: the refusals above would be free.
+(begin-tx)
+(expect-failure "IN-7 open-round refuses a direct call with no capability at all"
+  "not granted"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.open-round))
+(expect "IN-7a and no round was opened" 2
+  (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+(rollback-tx)
+(env-sigs [])
+
+(print "roulette internals suite complete: a round opens on the row's terms, never the caller's")

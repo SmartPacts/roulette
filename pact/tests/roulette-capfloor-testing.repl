@@ -1,0 +1,410 @@
+;; roulette-capfloor-testing.repl — the TABLE LIMIT's two operands, pinned.
+;;
+;; The cap is `f0 * min(available, a0)`. Every part of that expression is
+;; load-bearing and each was added after a measured attack, but until this file
+;; existed the whole thing was defended by nothing: a review mutation reverted
+;; it to `f0 * a0`, every gate still reported clean, and a stranger put 64.88% of
+;; the bank on one spin. That is the shape this suite exists to stop -- THE CHECK
+;; EXISTS AND THE PIN DOES NOT.
+;;
+;; Two directions, because the two operands fail differently:
+;;   CF-1  the DENOMINATOR disappears (withdrawal mid-round)  -> `available` binds
+;;   CF-2  the DENOMINATOR grows      (funding mid-round)     -> `a0` binds
+;; and CF-3, that what `pot-status` ADVERTISES is a board `bet` actually takes.
+;;
+;; Every probe asserts its own three preconditions before the refusal, so a
+;; refusal can never pass for the wrong reason: inside the reverted cap, outside
+;; the live one, and comfortably inside solvency.
+
+(load "roulette-test-init.repl")
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-sigs [])
+
+(module cfh GOV (defcap GOV () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defun vmax:decimal (xs:[decimal])
+    (fold (lambda (x:decimal y:decimal) (if (> y x) y x)) 0.0 xs))
+  ;; what the module will charge this round against the cap, for a stake placed
+  ;; on an even-money key: gross payout 2x, plus the fee. 2.05 is a deliberate
+  ;; OVER-estimate of (2 + rate) -- rate never exceeds HOUSE-EDGE = 1/37 -- so a
+  ;; stake solved with it lands just BELOW the target, never above.
+  (defun solve:decimal (target:decimal used:decimal)
+    (floor (/ (- target used) 2.05) 12))
+  (defun used:decimal (r:object)
+    (+ (vmax (at 'exposure r)) (at 'fee-owed r)))
+  ;; CF-4 solves against the EXACT multiplier rather than the 2.05 over-estimate:
+  ;; the window it has to land inside is only `f0 * round-1's reserve` wide, and
+  ;; a 0.023 per-unit over-estimate would eat most of it.
+  (defun charge:decimal (u:decimal stake:decimal rate:decimal)
+    (+ u (+ (* 2.0 stake) (floor (* rate stake) 12))))
+  (defun solve-exact:decimal (target:decimal u:decimal rate:decimal)
+    (floor (/ (- target u) (+ 2.0 rate)) 12)))
+
+;; ============================================================================
+;; CF-1  THE DENOMINATOR DISAPPEARING.
+;;   `a0` is frozen at open so a later set-params cannot widen the numerator. It
+;;   does nothing about the pot itself leaving. MEASURED before the fix: with a
+;;   round open, an admin withdrawal of 95% of the pot left a stranger able to
+;;   put 90.96% of the REMAINING bank on one spin, no enforce firing.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+;; 50, not 100. This board is the round's standing exposure for the whole file,
+;; and every later probe is sized against what the table limit leaves after it:
+;; 2 x 50 + fee = 100.68 against a cap of 0.025 x 50000 = 1250, i.e. 8.05% of
+;; the cap -- the same 8.05% a 100 board took when the share was twice as wide.
+;; CF-3d in particular needs headroom left after a 95% withdrawal, and a board
+;; sized against the old share swallows all of it.
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.ALICE [{"key":"bet-red","amt":50.0}])   ; opens the round
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect "CF-1a the round froze the pot as it stood at open" 50000.0
+  (at 'avail-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round
+                       (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))))
+(commit-tx)
+
+;; the admin takes 90% of what is unreserved. This is a legitimate call: the
+;; pot's own solvency check still passes. It is the TABLE LIMIT that must notice.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house (floor (* 0.9 (at 'available p)) 12)))
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (seq   (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (r     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq))
+        (a0    (at 'avail-at-open r))
+        (f0    (at 'frac-at-open r))
+        (now   (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+        (u     (cfh.used r))
+        ;; the midpoint of the two caps: strictly above the live one, strictly
+        ;; below the reverted one, BY CONSTRUCTION rather than by a lucky number.
+        (target (* f0 (* 0.5 (+ now a0))))
+        (stake (cfh.solve target u))
+        (charged (+ u (* 2.05 stake))) )
+
+  (expect "CF-1b the pot really did shrink below what the round opened against" true
+    (< now a0))
+  (expect "CF-1c the probe board is INSIDE the reverted cap f0*a0" true
+    (< charged (* f0 a0)))
+  (expect "CF-1d the probe board is OUTSIDE the live cap f0*min(available,a0)" true
+    (> charged (* f0 now)))
+  ;; if this failed, the refusal below would be solvency talking, not the cap
+  (expect "CF-1e and solvency is NOT what refuses it -- the pot covers this board" true
+    (< (* 2.05 stake) now))
+
+  (expect-failure "CF-1f so the table limit refuses a board sized against a pot that left"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.BOBBY [{"key":"bet-black","amt":stake}])))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-2  THE DENOMINATOR GROWING. The mirror image, and the reason the
+;;   expression is min() and not simply `available`: funding the pot mid-round
+;;   must not retroactively widen a table that players already sat down at.
+;; ============================================================================
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 90000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 90000.0)
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (seq   (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (r     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq))
+        (a0    (at 'avail-at-open r))
+        (f0    (at 'frac-at-open r))
+        (now   (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+        (u     (cfh.used r))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (stake (cfh.solve target u))
+        (charged (+ u (* 2.05 stake))) )
+
+  (expect "CF-2a the pot is now LARGER than what the round opened against" true
+    (> now a0))
+  (expect "CF-2b the probe board is OUTSIDE the frozen cap f0*a0" true
+    (> charged (* f0 a0)))
+  (expect "CF-2c but INSIDE what a live-`available` cap would have allowed" true
+    (< charged (* f0 now)))
+
+  (expect-failure "CF-2d so funding mid-round does not widen a table already in play"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.BOBBY [{"key":"bet-black","amt":stake}])))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-3  WHAT pot-status ADVERTISES IS A BOARD `bet` TAKES.
+;;   `pot-status` sized its headroom against `a0` alone while `bet` bound against
+;;   min(available, a0), so mid-round -- exactly the state CF-1 leaves behind --
+;;   it published a number the very next transaction refused. Measured 12% high.
+;;   A front end is explicitly invited to build on this number, so the two
+;;   expressions have to be the same one.
+;; ============================================================================
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (p     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+        (advert (at 'max-even-money-bet p)) )
+  (expect "CF-3a there IS an advertised board to check" true (> advert 0.0))
+  ;; the advertised number, placed verbatim. No margin, no rounding down.
+  (expect "CF-3b the advertised even-money maximum is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.BOBBY [{"key":"bet-red","amt":advert}])))
+(rollback-tx)
+(env-sigs [])
+
+;; and the same claim in the state CF-1 built: a round open against a pot that
+;; has since shrunk. This is the case that was 12% high.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status)))
+;; 🔴 95%, not 90%, and the reason is load-bearing. `pot-status` publishes the
+;; SMALLER of the table cap and the bankroll rule (available/100). At 90% the
+;; BANKROLL rule binds, the cap expression is never exercised, and reverting it
+;; is INVISIBLE -- measured: this suite passed against a reverted `pot-status`
+;; until this line changed. CF-3d1 asserts which of the two is binding, so the
+;; test can never quietly stop testing the thing it names.
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house (floor (* 0.95 (at 'available p)) 12)))
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (p      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+        (advert (at 'max-even-money-bet p))
+        (seq    (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (r      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq)) )
+  (expect "CF-3c the round is still open against the bigger pot it froze" true
+    (> (at 'avail-at-open r) (at 'available p)))
+  (expect "CF-3d mid-round, with the pot shrunk, it still advertises a real board" true
+    (> advert 0.0))
+  ;; without this, CF-3e passes for the wrong reason the moment the bankroll
+  ;; rule happens to be the smaller of the two.
+  (expect "CF-3d1 and it is the TABLE CAP that bounds it, not the bankroll rule" true
+    (< advert (floor (/ (at 'available p) 100.0) 12)))
+  (expect "CF-3e and THAT board is accepted verbatim too" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.BOBBY [{"key":"bet-red","amt":advert}])))
+(rollback-tx)
+(env-sigs [])
+
+
+;; ============================================================================
+;; CF-4  `avail-at-open` IS THE POT MINUS WHAT EARLIER ROUNDS STILL OWE
+;;   Every round freezes the pot as it stood when it opened, and that number is
+;;   the UNRESERVED pot -- `balance` minus `reserved`. Taking the raw balance
+;;   instead hands a new round a cap sized on money that is already promised to
+;;   the rounds before it, and nothing else in the module notices: `reserved <=
+;;   balance` stays true throughout, the accounting oracle balances, and every
+;;   single-round suite is blind to it because with one round open the two
+;;   expressions are the same number. It only separates while an EARLIER round is
+;;   still unsettled -- which is the normal state of a table that is running.
+;;   Round 1 above is still open and still holds its reserve, so this is that
+;;   state, reached without contriving anything.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:05:00Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}
+          ,{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 200000.0)]}])
+(begin-tx)
+(let* ( (bal0 (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account)))
+        (res0 (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (r1   (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1))
+        ;; opening the second round is the act under test
+        (opened (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.BOBBY [{"key":"bet-red","amt":1.0}]))
+        (seq  (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params)))
+        (r2   (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq)) )
+
+  (expect "CF-4a round 1 really is still unsettled" "open" (at 'state r1))
+  (expect "CF-4a1 and it really still holds reserve, so the two expressions differ" true
+    (> res0 0.0))
+  (expect "CF-4a2 the second round is a NEW round, not a join" 2 seq)
+  ;; 🔴 THE PIN. Read from the two live values, never restated.
+  (expect "CF-4b so avail-at-open is the pot MINUS what round 1 still owes"
+    (- bal0 res0) (at 'avail-at-open r2))
+  (expect "CF-4b1 which is strictly less than the raw balance" true
+    (< (at 'avail-at-open r2) bal0))
+
+  ;; and the consequence, sized so only the difference between the two decides it
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.fund-house "house-funder" 200000.0)
+  (let* ( (p        (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+          (now      (at 'available p))
+          (rate     (at 'fee-rate-now p))
+          (f0       (at 'frac-at-open r2))
+          (u        (cfh.used (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round seq)))
+          ;; the cap as it must be, and the cap a raw-balance `avail` would give
+          (true-cap (* f0 (if (< now (- bal0 res0)) now (- bal0 res0))))
+          (raw-cap  (* f0 (if (< now bal0) now bal0)))
+          ;; three quarters of the way across the gap: clear of both edges
+          (target   (+ true-cap (* 0.75 (- raw-cap true-cap))))
+          (stake    (cfh.solve-exact target u rate))
+          (charged  (cfh.charge u stake rate)) )
+
+    (expect "CF-4c the pot was funded well past both caps, so `available` binds neither" true
+      (> now bal0))
+    (expect "CF-4d the probe board is OUTSIDE the cap the round actually has" true
+      (> charged true-cap))
+    (expect "CF-4e and INSIDE the cap a raw-balance `avail-at-open` would have given" true
+      (< charged raw-cap))
+    (expect "CF-4f solvency is not what refuses it: the pot covers this board many times over" true
+      (< (* 3.0 stake) now))
+    (expect-failure "CF-4g so the table limit refuses a board sized on money round 1 has already promised"
+      "would exceed the table limit"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.ALICE [{"key":"bet-red","amt":stake}]))))
+;; 🔴 rollback-tx: `bet` writes the round and the game row before the transfer,
+;; and a refused one leaks those writes through a commit.
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-5  BELOW THE TABLE MINIMUM, NOTHING IS ADVERTISED
+;;   `max-even-money-bet` is what a front end sends. When the pot is small enough
+;;   that min(available/100, cap) falls under the table minimum, publishing that
+;;   number sends the front end to a transaction `bet` refuses on sight, so the
+;;   view publishes 0.0 instead. Returning `advert` unconditionally leaves every
+;;   other assertion in this repo green -- CF-3a..CF-3e all run against pots
+;;   where the advert is comfortably above the minimum, which is the only region
+;;   anything had ever measured.
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (p0      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+        ;; 🔴 DRAINED TO 100x THE TABLE MINIMUM MINUS A HAIR, derived and not
+        ;; picked: the branch under test only exists where available/100 falls
+        ;; UNDER the minimum, so the pot has to end below 100 x 0.01 = 1 KDA.
+        ;; 0.5 puts the bankroll rule at 0.005, half the minimum.
+        (drained (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.withdraw-house (floor (- (at 'available p0) 0.5) 12)))
+        (p       (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+        (g       (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params))
+        (minbet  (at 'min-bet g))
+        (bankroll (floor (/ (at 'available p) 100.0) 12))
+        (by-cap  (floor (/ (* (at 'reserve-fraction g) (at 'available p))
+                           (+ 2.0 (at 'fee-rate-now p))) 12)) )
+  (expect "CF-5a the pot is down to half a KDA unreserved" 0.5 (at 'available p))
+  ;; VALUE TEST: the launch minimum, as the player terms and the founder page
+  ;; quote it. A literal on purpose -- reading LAUNCH-MIN-BET would move with it.
+  (expect "CF-5b the table minimum is 0.01" 0.01 minbet)
+  (expect "CF-5c the bankroll rule alone would publish a real number" 0.005 bankroll)
+  (expect "CF-5c1 CONTROL and it is the bankroll rule that binds, not the cap" true
+    (> by-cap bankroll))
+  (expect "CF-5d but 0.005 is under the minimum, so nothing is advertised" 0.0
+    (at 'max-even-money-bet p))
+  ;; 🔴 THE CONSEQUENCE, which is the whole reason the branch exists.
+  (expect-failure "CF-5e and a board of the size it would otherwise publish is refused"
+    "total bet below the table minimum"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.ALICE [{"key":"bet-red","amt":bankroll}])))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-6  AT THE WHOLE SPARE POT, SOLVENCY IS WHAT REFUSES -- NOT THE TABLE LIMIT
+;;   The share is the operator's, and the only bound the contract keeps is that
+;;   a round cannot put at risk more than the pot has spare. At the top of that
+;;   range the two checks in `bet` come apart, and this is the one case where
+;;   the SECOND one is load-bearing:
+;;     the table limit bounds max(exposure) + fee -- what the best pocket pays;
+;;     the reserve must ALSO cover a VOID refund of every stake, and a board
+;;     spread across the wheel stakes MORE than its own best pocket pays.
+;;   So a board can pass the table limit and still book a reserve the pot cannot
+;;   cover. While the share was capped at a twentieth of the pot that gap was
+;;   arithmetically unreachable and the check survived deletion with the whole
+;;   gate green; at 1.0 it is the only thing between a bet and an insolvent pot.
+;;
+;;   The board: S on red, S on black, S/18 on zero. Red and black are disjoint
+;;   and each pays 2x, so every pocket but zero carries exactly 2S; zero carries
+;;   36 x (S/18) = 2S as well. max(exposure) is therefore 2S however the spin
+;;   lands, while the STAKE is 2S + S/18 -- the excess is the refund liability
+;;   the table limit cannot see.
+;;
+;;   Sizing, derived rather than probed: the largest max(exposure) `u` the table
+;;   limit admits satisfies u + rate*u*(37/36) <= available, since the stake of
+;;   this board is u*(37/36). Then reserve - available is about u/36, roughly a
+;;   thirty-seventh of the pot: a wide margin, not a knife edge.
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+;; the founder's dial, at the top of its range. This is a plain admin call: no
+;; upgrade, no governance, and it would work the same after the freeze.
+(expect "CF-6 the operator may set the share to the whole spare pot" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.set-params 1.0 0.01 100000.0 120.0 180.0))
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.house-account) 100000.0)]}])
+;; CONTROL FIRST. The same board WITHOUT the chip on zero stakes exactly what
+;; its best pocket pays, so its reserve is the table limit's own expression and
+;; the pot covers it. If this were refused, the refusal below would prove
+;; nothing about which check fired.
+(begin-tx)
+(let* ( (p    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+        (b    (at 'available p))
+        (rate (at 'fee-rate-now p))
+        (u    (floor (/ b (+ 1.0 (/ (* 37.0 rate) 36.0))) 12))
+        (side (floor (/ u 2.0) 12)) )
+  (expect "CF-6a0 CONTROL the same board without the refund excess is ACCEPTED"
+    "bet placed in round 2"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.ALICE [{"key":"bet-red","amt":side} {"key":"bet-black","amt":side}])))
+(rollback-tx)
+
+(begin-tx)
+(let* ( (p    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.pot-status))
+        (b    (at 'available p))
+        (rate (at 'fee-rate-now p))
+        (g    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-params))
+        (u    (floor (/ b (+ 1.0 (/ (* 37.0 rate) 36.0))) 12))
+        (side (floor (/ u 2.0) 12))
+        (zero (floor (/ u 36.0) 12))
+        (stake (+ (* 2.0 side) zero))
+        (worst (* 2.0 side))                       ; max(exposure), either colour
+        (fee   (floor (* rate stake) 12)) )
+
+  (expect "CF-6a the share really is the whole spare pot" 1.0 (at 'reserve-fraction g))
+  (expect "CF-6b the round is not the open one, so this board opens a fresh round" true
+    (> (at 'block-time (chain-data)) (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.get-round 1))))
+  ;; the two preconditions that make the refusal mean what its title says
+  (expect "CF-6c the board is INSIDE the table limit it will be measured against" true
+    (<= (+ worst fee) b))
+  (expect "CF-6d but its reserve -- which must cover a refund of every stake -- is ABOVE the pot" true
+    (> (+ stake fee) b))
+  (expect "CF-6d1 CONTROL and the gap is the refund excess, about a thirty-sixth of the pot" true
+    (> (- (+ stake fee) b) (* 0.02 b)))
+
+  (expect-failure "CF-6e so the pot refuses a board it cannot cover, at the top of the range"
+    "the pot cannot cover this bet"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette.bet cfh.ALICE [{"key":"bet-red","amt":side}
+                       {"key":"bet-black","amt":side}
+                       {"key":"bet-0","amt":zero}])))
+;; 🔴 rollback-tx: the refused bet opened a round and wrote the game row before
+;; the limit checks fired, and a commit would persist both.
+(rollback-tx)
+(env-sigs [])
+
+(print "roulette cap-floor suite complete: both operands of the table limit are pinned")

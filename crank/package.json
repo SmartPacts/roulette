@@ -1,0 +1,16 @@
+{
+  "name": "roulette-crank",
+  "private": true,
+  "type": "module",
+  "description": "Resolver and drand-liveness bot for smartpacts.roulette. Holds no privilege; signs coin.GAS only. Run at least two on separate machines.",
+  "scripts": {
+    "crank": "node roulette-crank.mjs",
+    "once": "node roulette-crank.mjs --once",
+    "keygen": "node crank-keygen.mjs",
+    "backup": "node key-backup.mjs"
+  },
+  "dependencies": {
+    "@kadena/client": "^1.18.3",
+    "@kadena/cryptography-utils": "^0.4.4"
+  }
+}
