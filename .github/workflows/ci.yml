@@ -17,6 +17,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # GitHub disables scheduled workflows in a public repository after 60 days
+  # without repository activity. After a quiet spell the weekly on-chain
+  # comparison stops silently: re-enable it, or run it by workflow_dispatch.
   schedule:
     - cron: '17 6 * * 1'        # the on-chain comparison, weekly
   workflow_dispatch:
@@ -43,7 +46,7 @@ jobs:
     # 24.04 is not cosmetic: the pinned tarball is the ubuntu-24.04 build.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install Pact 5.4ce (content-pinned)
         run: |
@@ -91,12 +94,15 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: The chain is running deploy-bytes/, character for character
         run: |
           set -euo pipefail
           for m in roulette drand; do
             python3 .github/scripts/fetch-onchain.py "$m" > "/tmp/onchain-$m.pact"
             python3 .github/scripts/compare-onchain.py "$m" "/tmp/onchain-$m.pact"
-            echo "   module hash on chain: $(python3 .github/scripts/fetch-onchain.py "$m" --hash)"
+            # Assigned first so a failed fetch stops the job; inside `echo "$(…)"`
+            # its exit status would be discarded and the step would stay green.
+            hash=$(python3 .github/scripts/fetch-onchain.py "$m" --hash)
+            echo "   module hash on chain: $hash"
           done
