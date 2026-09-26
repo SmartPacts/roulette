@@ -11,7 +11,7 @@
 ;; updates the aggregate wrongly shows up here even when every scenario test
 ;; still passes -- which is exactly the failure a scenario suite cannot see.
 ;;
-;; Adapted from an independent red-team oracle that was calibrated against a
+;; Adapted from an independent adversarial oracle that was calibrated against a
 ;; planted one-line bug; the same calibration is the falsification for this file.
 
 (load "roulette-test-init.repl")

@@ -11,7 +11,7 @@
 # and sent unmodified.
 #
 # `--hash` prints the module hash the chain reports instead of the code. That number is worth
-# reading for `drand` and worth nothing for `roulette` — VERIFY.md §2 says why.
+# reading for `drand` and worth nothing for `roulette` — VERIFY.md §3 says why.
 import base64, hashlib, json, sys, urllib.request
 
 args   = [a for a in sys.argv[1:] if not a.startswith("--")]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pact 5 static-analysis gate for generic Copilot/Pact customization bundles.
+# Pact 5 static-analysis gate for this repository's .pact and .repl files.
 
 set -euo pipefail
 

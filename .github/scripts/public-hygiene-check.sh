@@ -18,10 +18,11 @@
 # that could quietly cover a new file.
 #
 # 🔴 THE SECOND EXCEPTION, narrower. .github/scripts/pact-static-check.sh is the estate's generic
-# Pact gate, shipped here byte for byte as it is already published at
-# github.com/SmartPacts/prize-draw. Its own text names the release the weakness it warns about was
-# fixed in. It is exempt from the engine-weakness pattern ONLY, and only at that exact path;
-# changing it here would make this repository's gate differ from the published one for no gain.
+# Pact gate, shipped here with the same checks as the copy published at
+# github.com/SmartPacts/prize-draw (only its header comment differs). Its own text names the
+# release the weakness it warns about was fixed in. It is exempt from the engine-weakness pattern
+# ONLY, and only at that exact path; changing its checks here would make this repository's gate
+# differ from the published one for no gain.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
 
@@ -56,22 +57,19 @@ check() {                       # check <label> <pattern> [exempt...]
   done
 }
 
-check "decision-record reference" 'ADR-[0-9]{3}|ADR-[A-Z][0-9]+|docs/adr' "${DEPLOYED_VERBATIM[@]}"
+# The patterns below are CLASSES, never a list of names: a denylist of private identifiers,
+# published, would itself disclose what it exists to keep out.
+check "decision-record reference" 'ADR-[A-Z]*[0-9]|docs/adr' "${DEPLOYED_VERBATIM[@]}"
 check "internal epic id"          'CW32-[0-9]+'
-check "review-round numbering"    'cold audit|audit #?[0-9]|delta audit|red[- ]team engagement|mutation #[0-9]+' "${DEPLOYED_VERBATIM[@]}"
+check "review-round numbering"    '[Cc]old audit|audit #|delta audit|[Rr]ed[- ][Tt]eam|mutation #[0-9]+' "${DEPLOYED_VERBATIM[@]}"
 # An absolute path out of somebody's machine is banned EVERYWHERE, with no exemption: if one ever
 # appeared inside a deployed module we would want to know, even though we could not remove it.
-check "private path"              '/home/[A-Za-z0-9_-]+|~/claude|/mnt/c/Users'
-# The names of our non-public repositories resolve to nothing for a reader. The two deployed
-# modules name one in a comment; that comment is already on chain and cannot be edited here
-# without breaking VERIFY.md's claim, so they are exempt BY EXACT PATH and nothing else is.
-check "internal repository name"  'roulette-ops|casino-private|smartpacts-private' "${DEPLOYED_VERBATIM[@]}"
-check "personal email"            'afloresh|@gmail\.com'
-check "assistant trace"           'Claude|Anthropic|Co-Authored-By|claude-code|Generated with'
-check "internal memory/config"    'CLAUDE\.md|STATUS\.md|MANAGER-NEXT|smart-pacts-shares'
-# Device and custody identifiers. The colour words are device names in our signing roster; they
-# appear in the deployed modules' own comments, which are already on chain, and nowhere else.
-check "device or custody id"      "m/44'?/626|Nano S|device hash|\\bpurple\\b|\\bpink\\b" "${DEPLOYED_VERBATIM[@]}"
+check "private path"              '/home/[A-Za-z0-9_.-]+|/Users/[A-Za-z0-9_.-]+|/mnt/[a-z]/'
+check "personal email"            '[A-Za-z0-9._%+-]+@gmail\.com'
+check "host address"              '(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}([^0-9.]|$)' "${DEPLOYED_VERBATIM[@]}"
+check "live heartbeat id"         'hc-ping\.com/[0-9a-f-]{8,}'
+check "commit trailer or tool trace" '[Cc]o-[Aa]uthored-[Bb]y|[Gg]enerated with'
+check "key derivation path"       "m/44'?/[0-9]" "${DEPLOYED_VERBATIM[@]}"
 # An engine weakness whose fix a reader cannot assume is deployed on every node they might use is
 # not ours to describe in public. Ours is to write code that is safe either way and say THAT.
 check "engine-weakness description" \

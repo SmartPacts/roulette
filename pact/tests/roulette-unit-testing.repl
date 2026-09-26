@@ -455,11 +455,11 @@
 ;; ============================================================================
 (begin-tx)
 ;; 🔴 The published player terms say "You need no KDA to collect", and that
-;; promise rests on a gas station paying the gas for a claim, up to a fixed
-;; ceiling carried by its registry entry. That station is a separate contract and
-;; is not part of this deployment, so it is not published here. What IS checkable
-;; from the contract alone is the half that decides whether the promise can hold:
-;; that a real claim fits comfortably under the ceiling. 2000 is that ceiling.
+;; promise rests on the helper in crank/: `claim` is permissionless and pays the
+;; board's own account whoever sends it, so the helper sends the claim and pays
+;; its gas. There is no gas station. The helper allows 2000 gas a claim
+;; (CLAIM_GAS). What IS checkable from the contract alone is the half that decides
+;; whether the promise can hold: that a real claim fits comfortably under 2000.
 (env-events true)            ; clear, so E-2 below sees only this claim
 (env-gasmodel "table")
 (env-gaslimit 150000)
@@ -910,7 +910,8 @@
 (commit-tx)
 
 ;; No admin entry point takes a payout, a multiplier, or a set of winning numbers.
-;; set-params is the ONLY setter and it carries four values, none of which can
+;; set-params is the ONLY setter and it carries five values (reserve-fraction,
+;; min-bet, target-float, bet-window, drand-margin), none of which can
 ;; reach a player's odds or their payout.
 (env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
 (begin-tx)
