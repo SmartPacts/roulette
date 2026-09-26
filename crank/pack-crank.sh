@@ -9,9 +9,9 @@
 # crank tree, never the working tree — and refuses to run while anything under crank/ is
 # modified or untracked, so a tarball can never carry an edit that is not in git. A COMMIT file
 # holding HEAD's full 40-character id rides at the root of the archive, and the provisioner reads
-# it back and prints it, so a machine can always say which commit it runs. The tracked node_modules
-# symlink (a dev-machine convenience into devnet-harness) is left out: the host builds its own from
-# package-lock.json.
+# it back and prints it, so a machine can always say which commit it runs. node_modules is never
+# packed (this repository does not track one; the exclusion is a guard): the host builds its own
+# from package-lock.json.
 #
 # The archive is reproducible: every entry is stamped with HEAD's commit time, so packing the same
 # commit twice gives the same bytes and the same sha256. Pass that sha256 to the provisioner.

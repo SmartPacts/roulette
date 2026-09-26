@@ -37,22 +37,75 @@ for. The bot logs that as benign.
 
 ## Running one
 
+You need Node (the provisioner installs v24.21.0; that is the version it is run on) and a clone of
+this repository. Everything below runs from inside `crank/`.
+
 ```bash
-node crank-keygen.mjs                 # a fresh keypair; fund its k: account with a little gas
-cp crank.env.example crank.env        # every setting is optional
-node roulette-crank.mjs --once        # one pass, then exit — read what it would do
+cd crank
+npm ci                                             # installs the pinned dependencies from package-lock.json
+node crank-keygen.mjs "$HOME/roulette/crank-key.json"
 ```
 
-Read `crank.env.example` first: it documents every setting, including the heartbeat URL that tells
-you when the bot has stopped, and which node it talks to. For a machine you want to leave running,
-`provision-roulette-crank.sh` installs it on a fresh Ubuntu 24.04 host as a systemd service, and
-`roulette-crank.service` is that unit — sandboxed, with the key and the settings kept outside the
-directory an update replaces. `pack-crank.sh` builds the tarball the provisioner installs, from
-committed bytes only, reproducibly.
+`crank-keygen.mjs` takes one argument, the path of the key file to write. It creates the directory
+if needed, writes the file with mode 0600, prints the public key and the `k:` account, and refuses
+to overwrite a file that already exists. Keep that file outside the checkout, and send its account a
+little KDA on the chain the crank will use: every call it makes costs gas.
 
-**Mainnet is interlocked on purpose.** Against `mainnet01` the program refuses to start unless
-`ROULETTE_MAINNET=armed` is set, refuses a key file that lives inside this checkout, and refuses a
-localhost node. Point it at a devnet first.
+The program reads **environment variables and nothing else**. `crank.env.example` is written for
+systemd, which reads `/etc/roulette/crank.env` through the unit's `EnvironmentFile=`; the program
+itself never opens that file. By hand, put the settings on the command line, replacing the three
+values in angle brackets with your own (see the devnet paragraph below):
+
+```bash
+ROULETTE_BOT_KEY="$HOME/roulette/crank-key.json" \
+ROULETTE_HOST=<your node's URL> \
+ROULETTE_NETWORK=<its network id> \
+ROULETTE_MOD=<the module you deployed> \
+node roulette-crank.mjs --once
+```
+
+`--once` makes one full pass and then exits. It is **not** a dry run: it sends every transaction
+that pass calls for — a resolve, the winners' claims, a liveness proof. Without `--once` it repeats
+the pass every `POLL_MS` until stopped.
+
+| setting | default in the code | what it is |
+|---|---|---|
+| `ROULETTE_BOT_KEY` | none, required | path to the key file `crank-keygen.mjs` wrote |
+| `ROULETTE_HOST` | `http://localhost:8095` | the node it reads from and sends to |
+| `ROULETTE_NETWORK` | `recap-development` | the network id; `mainnet01` turns on the interlocks below |
+| `ROULETTE_CHAIN` | `2` | the chain the module lives on |
+| `ROULETTE_MOD` | `n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette` | the module it drives |
+| `ROULETTE_MAINNET` | unset | must be `armed` when the network is `mainnet01` |
+| `HEARTBEAT_URL` | empty (off) | a URL it requests after every pass that read the chain |
+| `POLL_MS` | `15000` | milliseconds between passes |
+| `LIVENESS_MS` | `21600000` (6 h) | how old the on-chain liveness record may get before it is refreshed |
+| `CLAIMS_PER_PASS` | `400` | the most claims one pass pays |
+| `CLAIMS_PER_TX` | `40` | claims per transaction; anything above 120 is capped at 120 |
+| `CLAIM_GAS` | `2000` | gas allowed per claim in a batch |
+| `DRAND_RELAYS` | `https://api.drand.sh,https://api2.drand.sh,https://api3.drand.sh,https://drand.cloudflare.com` | comma-separated drand relays |
+
+A number that does not parse, or is not positive, falls back to its default.
+
+**To try it on a devnet you need your own deployment.** A devnet does not have the table, and it
+cannot host the principal namespace the mainnet modules live in. Deploy `pact/modules/drand.pact`
+and `pact/modules/roulette.pact` there yourself under a namespace your devnet allows. Both files
+name the mainnet namespace, `roulette` names its governance keyset, and `roulette` pins `drand` by
+its full name and hash, so your copy must replace those with your own namespace, your own keyset
+and the hash your `drand` reports. Then
+set `ROULETTE_MOD` to the name you deployed (for example `free.roulette`), `ROULETTE_HOST` and
+`ROULETTE_NETWORK` to your devnet's, and fund the key's account there.
+
+**Mainnet is interlocked on purpose.** With `ROULETTE_NETWORK=mainnet01` the program refuses to
+start unless `ROULETTE_MAINNET=armed` is set, refuses a localhost node, refuses a key file inside
+this checkout or under any directory named `crank` or `roulette-public`, and refuses to start while
+the key's account has no readable positive KDA balance on the chain — all before it sends anything.
+
+For a machine you want to leave running, `provision-roulette-crank.sh` installs it on a fresh
+Ubuntu 24.04 host as a systemd service, and `roulette-crank.service` is that unit — sandboxed, with
+the mainnet settings already in it and the key and your own settings kept in `/etc/roulette`,
+outside the directory an update replaces. `pack-crank.sh` builds the tarball the provisioner
+installs, from committed bytes only, reproducibly. Copy `crank.env.example` to
+`/etc/roulette/crank.env` for anything you want to change; it lists every setting above.
 
 **Your key is yours.** Nothing here ever asks for a seed phrase, and the provisioner never
 regenerates a key — that would orphan whatever the old account holds.

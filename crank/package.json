@@ -2,7 +2,7 @@
   "name": "roulette-crank",
   "private": true,
   "type": "module",
-  "description": "Resolver and drand-liveness bot for smartpacts.roulette. Holds no privilege; signs coin.GAS only. Run at least two on separate machines.",
+  "description": "Resolver and drand-liveness bot for n_48867b242317a0216a67f8c7ca26696b5878e0e3.roulette. Holds no privilege; signs coin.GAS only. Run at least two on separate machines.",
   "scripts": {
     "crank": "node roulette-crank.mjs",
     "once": "node roulette-crank.mjs --once",

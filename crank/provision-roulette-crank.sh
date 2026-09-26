@@ -3,8 +3,8 @@
 # an existing one. The same command does both, which is the point: an update you have to remember
 # four steps for is an update that eventually gets done wrong.
 #
-# Run ON THE MACHINE, as root. The code arrives as a TARBALL, not a git clone — the repository is
-# private — built on the dev machine by pack-crank.sh from committed bytes only. Copy the tarball to
+# Run ON THE MACHINE, as root. The code arrives as a TARBALL, not a git clone, so that what runs is
+# a named, checksummed artifact — built by pack-crank.sh from committed bytes only. Copy the tarball to
 # the machine, then run the copy of this script that the tarball itself contains, passing the
 # tarball's sha256 as pack-crank.sh printed it:
 #
