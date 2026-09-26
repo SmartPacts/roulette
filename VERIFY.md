@@ -51,7 +51,7 @@ file you actually read:
 
 ```bash
 python3 .github/scripts/module-region.py --check
-sha256sum -c deploy-bytes/SHA256SUMS          # run from inside deploy-bytes/
+(cd deploy-bytes && sha256sum -c SHA256SUMS)
 ```
 
 ```
@@ -101,7 +101,7 @@ The runner also fails if `or`, `and` or `+` is ever given more than two operands
 failure (that checker tests itself on a known sample first, so it cannot pass by scanning
 nothing), if the frozen-module fixture is anything other than `roulette` with its governance body
 replaced, if the `drand` hash built here is not the one `roulette` pins, or if the published
-player terms state a number the contract does not.
+player terms leave out one of the figures §5 lists.
 
 And it runs one file that **must exit 1, for a named reason**: `roulette-pin-must-fail.repl`. It
 plants an impostor `drand` whose `verified-seed` accepts any signature and returns a number the
@@ -110,10 +110,14 @@ would not be enough — any typo also exits 1 — so the refusal message is requ
 
 ## 5. The descriptions match the contract
 
-[`docs/ROULETTE-PLAYER-TERMS.md`](docs/ROULETTE-PLAYER-TERMS.md) states numbers, and every one of
-them is read out of `pact/modules/roulette.pact` by
+[`docs/ROULETTE-PLAYER-TERMS.md`](docs/ROULETTE-PLAYER-TERMS.md) states numbers.
 [`.github/scripts/check-player-terms.sh`](.github/scripts/check-player-terms.sh), which CI runs on
-every push. If the contract changes and that page does not, CI fails.
+every push, checks ten of them: eight constants it reads out of `pact/modules/roulette.pact` (the
+launch minimum bet, chips per board, betting window, beacon wait and table limit, the floor on the
+beacon wait, the ceiling on the table limit, and the refund grace) and the two payout-odds figures,
+which are written into the script. If one of those constants changes in the source and the page
+does not, CI fails. It reads the source, not the live chain: a setting the operator has changed
+since launch is not checked there, and any other number on that page is ours to keep right.
 
 [`docs/ROULETTE-WHAT-IT-DOES.md`](docs/ROULETTE-WHAT-IT-DOES.md) is **generated**, not written by
 hand, by a script in our private repository that reads the contract source, the verifier, the test
@@ -153,8 +157,10 @@ one-key path to any of them. The same keyset also governs the namespace, so nobo
 define a module under these names.
 
 `get-params` returns the dials and where the fee goes; `pot-status` returns the pot's balance,
-what is reserved against open rounds, and the largest even-money bet the contract would accept
-right now. `drand` has no keyset at all: its governance is `(enforce false)`.
+what is reserved against open rounds, and `max-even-money-bet`: the SMALLER of what the round's
+table cap has room for and one hundredth of the pot. That is a conservative figure to advertise,
+not the most the contract will take — a bigger even-money bet is accepted while the round's cap
+has room for it (mainnet round 29 took 190 KDA on black while about 160 was advertised). `drand` has no keyset at all: its governance is `(enforce false)`.
 
 **The exception to everything above.** While `roulette` is not frozen, those same two keys hold
 *module admin*, so one transaction can move the pot or rewrite any stored record — a round's

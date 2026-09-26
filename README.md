@@ -48,7 +48,7 @@ pact/vendor/      Kadena's coin + fungible interfaces, so the suite runs with no
 deploy-bytes/     the exact bytes the deploy transactions carried, plus their sha256
 deployments/      every mainnet transaction, with its request key and what confirmed it
 docs/             ROULETTE-PLAYER-TERMS.md — the rules and everything that can go wrong,
-                  every number in it checked against the contract by CI;
+                  ten of its figures checked by CI against the contract source (VERIFY.md §5);
                   ROULETTE-WHAT-IT-DOES.md — the same in plain language, GENERATED from the
                   contract and the test results (VERIFY.md §5)
 crank/            the helper that settles rounds and pays winners. Permissionless: it holds
