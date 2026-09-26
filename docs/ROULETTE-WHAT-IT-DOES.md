@@ -62,7 +62,9 @@ settles it, and the winners collect.
 **What it cannot do**
 
 - ✅ **Choose or steer the winning number** — the house included. The number is worked out from a
-  beacon nobody here produces, and the proof is checked by the contract itself.
+  beacon nobody here produces, and the proof is checked by the contract itself. Until the
+  contract is locked, the upgrade key could change the code that does this for rounds still
+  waiting for their number; that is the exception at the end of this list.
 - ✅ **Change a round once it has opened.** Its closing time, its beacon, its limit, its minimum and
   what the pot owes on every pocket are all fixed by its first bet.
 - ✅ **Take the fee out of your stake.** The fee comes out of the pot, and it only decides how much
@@ -76,8 +78,9 @@ settles it, and the winners collect.
 - ✅ **Recover a lost key.** A lost key is lost: on Kadena an account *is* its key, and winnings can
   only ever be paid to the account that placed the bet — nobody, the house included, can point
   them anywhere else.
-- ✅ **Stop the house's key from taking the pot, until the contract is locked.** That is the one
-  exception to everything above, and locking the contract is what ends it.
+- ✅ **Stop the house's key from taking the pot, until the contract is locked.** The same key can
+  also replace the code, including how a round still waiting for its number is decided. That is
+  the one exception to everything above, and locking the contract is what ends it.
 
 ---
 
@@ -157,7 +160,7 @@ cannot be thrown away by anyone here.
 
 ## What the house can and cannot do
 
-🟡 The house sends no transaction inside a round and holds no secret of any kind.
+🟡 The house's key sends no transaction inside a round and holds no secret of any kind; the helper it runs sends only the public calls anyone can send.
 ✅ Nothing the house holds can reach a round that is already open.
 ✅ The house cannot change what a bet pays, or the wheel itself.
 
@@ -188,7 +191,7 @@ earnings are paid into can be spent by nobody else either.
 ✅ A stalled round refunds every stake and takes no fee at all.
 ✅ A refund opens only after 90 days in which nobody has shown the contract a beacon, and not a second earlier.
 ✅ A refund also needs evidence on the chain that beacons really stopped, so simply waiting out the clock buys a loser nothing.
-✅ One cheap call, which anyone at all can send, shows the contract a beacon and resets that clock for every waiting round.
+✅ One cheap call, which anyone at all can send, shows the contract a beacon and closes the refund clock for every waiting round the beacon covers.
 ✅ That call settles nothing and moves no money.
 ✅ Once a later beacon is on the record, a round's refund is closed for good and the round must be settled instead.
 That holds at the boundary too: a record exactly equal to the round's own beacon still closes it.
@@ -249,7 +252,7 @@ directly, and it then does exactly what that call would do
 
 | | What it takes | What it does |
 |---|---|---|
-| 🟢 `pot-status` | — | What the pot holds, what it has reserved, the fee right now, and the largest even-money board it would accept. The largest even-money board it advertises is one a bet actually takes. It is re-checked mid-round against the pot as it stands. Nothing is advertised when the only board that would fit is under the minimum. |
+| 🟢 `pot-status` | — | What the pot holds, what it has reserved, the fee right now, and an advertised even-money maximum: the smaller of the round's cap and one hundredth of the pot, a conservative figure — a bet above it can still be accepted while the round's cap has room. The largest even-money board it advertises is one a bet actually takes. It is re-checked mid-round against the pot as it stands. Nothing is advertised when the only board that would fit is under the minimum. |
 | 🟢 `get-round` | A round | Everything the round froze when it opened, and its result. |
 | 🟢 `get-board` | A round and an account | That account's chips, its stake, and whether it has collected. |
 | 🟢 `round-boards` | A round | Every board placed in that round, so whoever is paying the winners can find them. It reads and nothing else: it moves no money and writes nothing down. |
