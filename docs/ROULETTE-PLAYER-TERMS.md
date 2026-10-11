@@ -100,11 +100,12 @@ worst case across all 37 pockets. It can refuse a bet; it cannot run short on on
 a higher age for games of chance, and playing a game of chance for KDA must be lawful where you
 are. The play page asks you to confirm this by ticking a box, and it asks your wallet to sign
 nothing until that box is ticked. That tick is the only check there is. The contract cannot
-know your age or where you are: it accepts a board from any account, and anyone can call it
-directly without the page. Whether you may play is yours to know, not something we can verify
-for you, and we keep no list of countries. **If you are under age, or play is unlawful where
-you are, do not play.** Play for entertainment, with money you can afford to lose; if play
-stops being fun, stop.
+know your age or where you are: it accepts a board from any wallet account (the one exception
+is a contract's `m:` account, which no wallet can hold), and anyone can call it directly
+without the page. Whether you may play is yours to know, not something we can verify for you,
+and we keep no list of countries. **If you are under age, or play is unlawful where you are, do
+not play.** Play for entertainment, with money you can afford to lose; if play stops being fun,
+stop.
 
 **You do not need any KDA to be paid.** The house runs a helper that sends every winner's
 collection for them — and, once a stalled round has been voided, every refund — usually within
